@@ -1,5 +1,12 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import canvasImg from './assets/imges.png'
+import {
+  downloadFramePdf,
+  downloadFramePng,
+  downloadFrameSvg,
+  safeExportBaseName,
+  type ExportFormat,
+} from './exportFrame'
 import './App.css'
 
 /* ============================
@@ -127,11 +134,148 @@ interface Position {
   y: number
 }
 
+type ResizeCorner = 'tl' | 'tr' | 'br' | 'bl'
+
+class Vec2 {
+  x: number
+  y: number
+
+  constructor(x: number, y: number) {
+    this.x = x
+    this.y = y
+  }
+
+  add(v: Vec2) {
+    return new Vec2(this.x + v.x, this.y + v.y)
+  }
+
+  sub(v: Vec2) {
+    return new Vec2(this.x - v.x, this.y - v.y)
+  }
+
+  had(v: Vec2) {
+    return new Vec2(this.x * v.x, this.y * v.y)
+  }
+
+  static of(x: number, y: number) {
+    return new Vec2(x, y)
+  }
+
+  static dot(a: Vec2, b: Vec2) {
+    return a.x * b.x + a.y * b.y
+  }
+}
+
+const MIN_NODE_SIZE = 50
+/** 新建无图画框的默认宽高（画布坐标） */
+const DEFAULT_NEW_FRAME_W = 1920
+const DEFAULT_NEW_FRAME_H = 1080
+
+/** CSS-style 2D rotation of a vector (degrees, +y down). */
+function rotateVec(v: Vec2, deg: number): Vec2 {
+  if (!deg) return v
+  const r = (deg * Math.PI) / 180
+  const c = Math.cos(r)
+  const s = Math.sin(r)
+  return Vec2.of(v.x * c - v.y * s, v.x * s + v.y * c)
+}
+
+function normalizeVec(v: Vec2): Vec2 {
+  const len = Math.hypot(v.x, v.y)
+  if (len < 1e-12) return Vec2.of(1, 0)
+  return Vec2.of(v.x / len, v.y / len)
+}
+
+/** Local offset from node center to a corner (unrotated box, +y down). */
+function cornerOffsetFromCenter(corner: ResizeCorner, w: number, h: number): Vec2 {
+  switch (corner) {
+    case 'tl':
+      return Vec2.of(-w / 2, -h / 2)
+    case 'tr':
+      return Vec2.of(w / 2, -h / 2)
+    case 'br':
+      return Vec2.of(w / 2, h / 2)
+    case 'bl':
+      return Vec2.of(-w / 2, h / 2)
+  }
+}
+
+/** Corner position in canvas (parent) space, accounting for rotation about box center. */
+function canvasCornerPos(n: NodeData, corner: ResizeCorner): Vec2 {
+  const cx = n.x + n.width / 2
+  const cy = n.y + n.height / 2
+  const off = cornerOffsetFromCenter(corner, n.width, n.height)
+  return Vec2.of(cx, cy).add(rotateVec(off, n.rotation))
+}
+
+/**
+ * Proportional resize so the dragged corner follows `targetCanvas` (mouse minus grab offset),
+ * opposite corner fixed in canvas space. Matches large hit targets on handles.
+ */
+function resizePatchFromTargetCorner(
+  snap: NodeData,
+  corner: ResizeCorner,
+  targetCanvas: Vec2
+): Partial<NodeData> {
+  const aspect = snap.width / snap.height
+  const rot = snap.rotation
+  const tl0 = canvasCornerPos(snap, 'tl')
+  const tr0 = canvasCornerPos(snap, 'tr')
+  const br0 = canvasCornerPos(snap, 'br')
+  const bl0 = canvasCornerPos(snap, 'bl')
+
+  if (corner === 'br') {
+    const v = targetCanvas.sub(tl0)
+    const nL = normalizeVec(Vec2.of(1, 1 / aspect))
+    const dirC = rotateVec(nL, rot)
+    const pMin = Math.max(MIN_NODE_SIZE / nL.x, MIN_NODE_SIZE / nL.y)
+    const p = Math.max(Vec2.dot(v, dirC), pMin)
+    const newW = p * nL.x
+    const newH = p * nL.y
+    return { x: snap.x, y: snap.y, width: newW, height: newH }
+  }
+
+  if (corner === 'tl') {
+    const v = br0.sub(targetCanvas)
+    const nL = normalizeVec(Vec2.of(1, 1 / aspect))
+    const dirC = rotateVec(nL, rot)
+    const pMin = Math.max(MIN_NODE_SIZE / nL.x, MIN_NODE_SIZE / nL.y)
+    const p = Math.max(Vec2.dot(v, dirC), pMin)
+    const newW = p * nL.x
+    const newH = p * nL.y
+    const tl = br0.sub(rotateVec(Vec2.of(newW, newH), rot))
+    return { x: tl.x, y: tl.y, width: newW, height: newH }
+  }
+
+  if (corner === 'tr') {
+    const v = targetCanvas.sub(bl0)
+    const nL = normalizeVec(Vec2.of(1, -1 / aspect))
+    const dirC = rotateVec(nL, rot)
+    const pMin = Math.max(MIN_NODE_SIZE / nL.x, MIN_NODE_SIZE / -nL.y)
+    const p = Math.max(Vec2.dot(v, dirC), pMin)
+    const newW = p * nL.x
+    const newH = -p * nL.y
+    const tl = bl0.sub(rotateVec(Vec2.of(0, newH), rot))
+    return { x: tl.x, y: tl.y, width: newW, height: newH }
+  }
+
+  // bl
+  const v = targetCanvas.sub(tr0)
+  const nL = normalizeVec(Vec2.of(-1, 1 / aspect))
+  const dirC = rotateVec(nL, rot)
+  const pMin = Math.max(MIN_NODE_SIZE / -nL.x, MIN_NODE_SIZE / nL.y)
+  const p = Math.max(Vec2.dot(v, dirC), pMin)
+  const newW = -p * nL.x
+  const newH = p * nL.y
+  const tl = tr0.sub(rotateVec(Vec2.of(newW, 0), rot))
+  return { x: tl.x, y: tl.y, width: newW, height: newH }
+}
+
 type DragAction =
   | { type: 'none' }
   | { type: 'pan' }
   | { type: 'move'; nodeId: string }
-  | { type: 'resize'; nodeId: string; corner: number }
+  | { type: 'resize'; nodeId: string; corner: ResizeCorner }
   | { type: 'rotate'; nodeId: string }
 
 interface NodeData {
@@ -142,7 +286,8 @@ interface NodeData {
   height: number
   rotation: number // degrees
   title: string
-  imageSrc: string
+  /** 无则渲染空白画框 */
+  imageSrc?: string
 }
 
 /* ============================
@@ -171,6 +316,11 @@ function App() {
     },
   ])
 
+  const handleToolModeChange = useCallback((mode: ToolMode) => {
+    setToolMode(mode)
+    if (mode === 'hand') setSelectedNodeId(null)
+  }, [])
+
   // --- Refs ---
   const viewportRef = useRef<HTMLDivElement>(null)
   const dragAction = useRef<DragAction>({ type: 'none' })
@@ -178,6 +328,60 @@ function App() {
   // Snapshot of node state at drag start (for resize & rotate)
   const dragStartNode = useRef<NodeData | null>(null)
   const dragStartMouse = useRef<Position>({ x: 0, y: 0 })
+  /**
+   * Viewport-local px: mouse − (offset + cornerCanvas·scale) at mousedown.
+   * Keeps resize correct at any zoom; mousemove uses latest scale/offset via ref.
+   */
+  const resizeGrabView = useRef<Vec2 | null>(null)
+  /** Latest viewport transform for window listeners (avoid stale effect closure). */
+  const viewportTransformRef = useRef({ scale, ox: offset.x, oy: offset.y })
+  viewportTransformRef.current = { scale, ox: offset.x, oy: offset.y }
+
+  const handleAddFrame = useCallback(() => {
+    const w = DEFAULT_NEW_FRAME_W
+    const h = DEFAULT_NEW_FRAME_H
+    const rect = viewportRef.current?.getBoundingClientRect()
+    const t = viewportTransformRef.current
+    let x = 100
+    let y = 100
+    if (rect) {
+      const cx = (rect.width / 2 - t.ox) / t.scale
+      const cy = (rect.height / 2 - t.oy) / t.scale
+      x = cx - w / 2
+      y = cy - h / 2
+    }
+    const id = `node-${Date.now()}`
+    const newNode: NodeData = {
+      id,
+      x,
+      y,
+      width: w,
+      height: h,
+      rotation: 0,
+      title: '画框',
+    }
+    setNodes((prev) => [...prev, newNode])
+    setSelectedNodeId(id)
+  }, [])
+
+  const handleDeleteSelected = useCallback(() => {
+    if (!selectedNodeId) return
+    const id = selectedNodeId
+    setNodes((prev) => prev.filter((n) => n.id !== id))
+    setSelectedNodeId(null)
+    const a = dragAction.current
+    if (
+      a.type === 'move' ||
+      a.type === 'resize' ||
+      a.type === 'rotate'
+    ) {
+      if (a.nodeId === id) {
+        dragAction.current = { type: 'none' }
+        dragStartNode.current = null
+        resizeGrabView.current = null
+      }
+    }
+  }, [selectedNodeId])
 
   // --- Computed ---
   const borderWidth = 6.66667
@@ -185,6 +389,28 @@ function App() {
   const titleScale = 3.33333
 
   const selectedNode = nodes.find((n) => n.id === selectedNodeId)
+
+  const handleExportFormat = useCallback(
+    async (format: ExportFormat) => {
+      if (!selectedNodeId || !selectedNode) return
+      const base = safeExportBaseName(selectedNode.title)
+      try {
+        if (format === 'svg') {
+          downloadFrameSvg(selectedNode, base)
+          return
+        }
+        const el = document.querySelector(
+          `[data-canvas-node="${selectedNodeId}"]`
+        ) as HTMLElement | null
+        if (!el) return
+        if (format === 'png') await downloadFramePng(el, base)
+        else await downloadFramePdf(el, base)
+      } catch (err) {
+        console.error('Export failed:', err)
+      }
+    },
+    [selectedNodeId, selectedNode]
+  )
 
   // Floating menu position (below the selected node, accounting for rotation)
   const floatingMenuPos = selectedNode
@@ -202,6 +428,7 @@ function App() {
   // --- Wheel zoom ---
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
+      if (!e.ctrlKey) return
       e.preventDefault()
       const rect = viewportRef.current?.getBoundingClientRect()
       if (!rect) return
@@ -263,12 +490,22 @@ function App() {
 
   // --- Resize handle mouse down ---
   const handleResizeMouseDown = useCallback(
-    (e: React.MouseEvent, nodeId: string, corner: number) => {
+    (e: React.MouseEvent, nodeId: string, corner: ResizeCorner) => {
       if (toolMode !== 'select') return
       e.stopPropagation()
       e.preventDefault()
       const node = nodes.find((n) => n.id === nodeId)
       if (!node) return
+      const rect = viewportRef.current?.getBoundingClientRect()
+      if (!rect) return
+      const t = viewportTransformRef.current
+      const cornerCanvas = canvasCornerPos(node, corner)
+      const mouseV = Vec2.of(e.clientX - rect.left, e.clientY - rect.top)
+      const cornerV = Vec2.of(
+        t.ox + cornerCanvas.x * t.scale,
+        t.oy + cornerCanvas.y * t.scale
+      )
+      resizeGrabView.current = mouseV.sub(cornerV)
       dragAction.current = { type: 'resize', nodeId, corner }
       dragStartNode.current = { ...node }
       dragStartMouse.current = { x: e.clientX, y: e.clientY }
@@ -306,70 +543,38 @@ function App() {
         setOffset((prev) => ({ x: prev.x + dx, y: prev.y + dy }))
         lastMousePos.current = { x: e.clientX, y: e.clientY }
       } else if (action.type === 'move') {
+        const t = viewportTransformRef.current
         setNodes((prev) =>
           prev.map((n) =>
             n.id === action.nodeId
-              ? { ...n, x: n.x + dx / scale, y: n.y + dy / scale }
+              ? { ...n, x: n.x + dx / t.scale, y: n.y + dy / t.scale }
               : n
           )
         )
         lastMousePos.current = { x: e.clientX, y: e.clientY }
       } else if (action.type === 'resize') {
         const startNode = dragStartNode.current
-        if (!startNode) return
-        const totalDx = (e.clientX - dragStartMouse.current.x) / scale
-        const totalDy = (e.clientY - dragStartMouse.current.y) / scale
-        const aspect = startNode.width / startNode.height
-
-        // Each corner has a diagonal direction; project mouse delta onto it
-        // so both X and Y mouse movement contribute naturally.
-        // Direction vectors: TL=(-1,-1), TR=(1,-1), BR=(1,1), BL=(-1,1)
-        const dirs: Record<number, [number, number]> = {
-          0: [-1, -1], // TL
-          1: [1, -1],  // TR
-          2: [1, 1],   // BR
-          3: [-1, 1],  // BL
-        }
-        const [dirX, dirY] = dirs[action.corner]
-        // Normalize: length of (1,1) = sqrt(2)
-        const invLen = 1 / Math.SQRT2
-        // Projected distance along the diagonal
-        const projected = (totalDx * dirX + totalDy * dirY) * invLen
-        // Convert diagonal distance to width delta (diagonal of rect has ratio sqrt(1 + 1/aspect^2) to width)
-        const diagToWidth = Math.SQRT2 // simplified: equal contribution from both axes
-        const widthDelta = projected * diagToWidth
-
-        const newW = Math.max(50, startNode.width + widthDelta)
-        const newH = newW / aspect
-
-        let newX = startNode.x
-        let newY = startNode.y
-
-        // Anchor the opposite corner
-        const corner = action.corner
-        if (corner === 0) {
-          // TL dragged → anchor BR
-          newX = startNode.x + startNode.width - newW
-          newY = startNode.y + startNode.height - newH
-        } else if (corner === 1) {
-          // TR dragged → anchor BL
-          newY = startNode.y + startNode.height - newH
-        } else if (corner === 2) {
-          // BR dragged → anchor TL (x,y stay)
-        } else if (corner === 3) {
-          // BL dragged → anchor TR
-          newX = startNode.x + startNode.width - newW
-        }
-
-        updateNode(action.nodeId, { x: newX, y: newY, width: newW, height: newH })
+        const grabV = resizeGrabView.current
+        if (!startNode || !grabV) return
+        const rect = viewportRef.current?.getBoundingClientRect()
+        if (!rect) return
+        const t = viewportTransformRef.current
+        const mouseV = Vec2.of(e.clientX - rect.left, e.clientY - rect.top)
+        const targetCorner = Vec2.of(
+          (mouseV.x - grabV.x - t.ox) / t.scale,
+          (mouseV.y - grabV.y - t.oy) / t.scale
+        )
+        const patch = resizePatchFromTargetCorner(startNode, action.corner, targetCorner)
+        updateNode(action.nodeId, patch)
       } else if (action.type === 'rotate') {
         const startNode = dragStartNode.current
         if (!startNode) return
         // Center of the node in screen coords
         const rect = viewportRef.current?.getBoundingClientRect()
         if (!rect) return
-        const centerScreenX = rect.left + offset.x + (startNode.x + startNode.width / 2) * scale
-        const centerScreenY = rect.top + offset.y + (startNode.y + startNode.height / 2) * scale
+        const t = viewportTransformRef.current
+        const centerScreenX = rect.left + t.ox + (startNode.x + startNode.width / 2) * t.scale
+        const centerScreenY = rect.top + t.oy + (startNode.y + startNode.height / 2) * t.scale
 
         // Angle from center to current mouse
         const angleNow = Math.atan2(
@@ -389,6 +594,7 @@ function App() {
     const handleMouseUp = () => {
       dragAction.current = { type: 'none' }
       dragStartNode.current = null
+      resizeGrabView.current = null
     }
 
     window.addEventListener('mousemove', handleMouseMove)
@@ -397,13 +603,31 @@ function App() {
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
     }
-  }, [scale, offset, updateNode])
+  }, [updateNode])
 
-  // Prevent default wheel scroll on the viewport
+  // Delete / Backspace: remove selected node（输入框内不拦截）
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Delete' && e.key !== 'Backspace') return
+      const el = e.target as HTMLElement | null
+      if (!el) return
+      if (el.closest('textarea, input, [contenteditable="true"]')) return
+      if (toolMode !== 'select' || !selectedNodeId) return
+      e.preventDefault()
+      handleDeleteSelected()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [toolMode, selectedNodeId, handleDeleteSelected])
+
+  // Only prevent browser zoom when Ctrl+wheel is used on viewport
   useEffect(() => {
     const el = viewportRef.current
     if (!el) return
-    const prevent = (e: WheelEvent) => e.preventDefault()
+    const prevent = (e: WheelEvent) => {
+      if (!e.ctrlKey) return
+      e.preventDefault()
+    }
     el.addEventListener('wheel', prevent, { passive: false })
     return () => el.removeEventListener('wheel', prevent)
   }, [])
@@ -547,10 +771,11 @@ function App() {
         {/* Top Toolbar */}
         <TopToolbar
           toolMode={toolMode}
-          onToolModeChange={setToolMode}
+          onToolModeChange={handleToolModeChange}
           onZoomIn={handleZoomIn}
           onZoomOut={handleZoomOut}
           onFitCanvas={handleFitCanvas}
+          onAddFrame={handleAddFrame}
         />
 
         {/* Canvas Content Layer */}
@@ -584,6 +809,8 @@ function App() {
           top={floatingMenuPos.top}
           editText={editText}
           onEditTextChange={setEditText}
+          onDelete={handleDeleteSelected}
+          onExportFormat={handleExportFormat}
         />
       )}
     </div>
@@ -600,9 +827,17 @@ interface TopToolbarProps {
   onZoomIn: () => void
   onZoomOut: () => void
   onFitCanvas: () => void
+  onAddFrame: () => void
 }
 
-function TopToolbar({ toolMode, onToolModeChange, onZoomIn, onZoomOut, onFitCanvas }: TopToolbarProps) {
+function TopToolbar({
+  toolMode,
+  onToolModeChange,
+  onZoomIn,
+  onZoomOut,
+  onFitCanvas,
+  onAddFrame,
+}: TopToolbarProps) {
   return (
     <div className="canvas-top-toolbar has-content">
       <button
@@ -625,7 +860,12 @@ function TopToolbar({ toolMode, onToolModeChange, onZoomIn, onZoomOut, onFitCanv
       <button className="toolbar-button mobile-invisible" title="缩小" onClick={onZoomOut}>
         <ZoomOutIcon />
       </button>
-      <button className="toolbar-button mobile-invisible" title="添加画框">
+      <button
+        type="button"
+        className="toolbar-button mobile-invisible"
+        title="添加画框"
+        onClick={onAddFrame}
+      >
         <AddFrameIcon />
       </button>
       <button className="toolbar-button mobile-invisible" title="全画布" onClick={onFitCanvas}>
@@ -649,7 +889,7 @@ interface CanvasNodeProps {
   handleSize: number
   titleScale: number
   onMouseDown: (e: React.MouseEvent) => void
-  onResizeMouseDown: (e: React.MouseEvent, corner: number) => void
+  onResizeMouseDown: (e: React.MouseEvent, corner: ResizeCorner) => void
   onRotateMouseDown: (e: React.MouseEvent) => void
 }
 
@@ -661,6 +901,7 @@ function CanvasNode({
 
   return (
     <div
+      data-canvas-node={node.id}
       style={{
         position: 'absolute',
         left: node.x,
@@ -696,34 +937,57 @@ function CanvasNode({
         {/* Image */}
         <div className="image-node">
           <div className="image-container">
-            <img src={node.imageSrc} alt={node.title} className="image-content" draggable={false} />
+            {node.imageSrc ? (
+              <img src={node.imageSrc} alt={node.title} className="image-content" draggable={false} />
+            ) : (
+              <div className="image-placeholder" aria-hidden />
+            )}
           </div>
         </div>
 
         {/* Selection Handles (only when selected) */}
         {isSelected && (
           <>
-            {/* Corner resize handles: 0=TL, 1=TR, 2=BR, 3=BL */}
             {[
-              { left: -handleSize / 2, top: -handleSize / 2, cursor: 'nwse-resize' },
-              { left: node.width - handleSize / 2, top: -handleSize / 2, cursor: 'nesw-resize' },
-              { left: node.width - handleSize / 2, top: node.height - handleSize / 2, cursor: 'nwse-resize' },
-              { left: -handleSize / 2, top: node.height - handleSize / 2, cursor: 'nesw-resize' },
-            ].map((pos, i) => (
+              {
+                corner: 'tl' as const,
+                left: -handleSize / 2,
+                top: -handleSize / 2,
+                cursor: 'nwse-resize' as const,
+              },
+              {
+                corner: 'tr' as const,
+                left: node.width - handleSize / 2,
+                top: -handleSize / 2,
+                cursor: 'nesw-resize' as const,
+              },
+              {
+                corner: 'br' as const,
+                left: node.width - handleSize / 2,
+                top: node.height - handleSize / 2,
+                cursor: 'nwse-resize' as const,
+              },
+              {
+                corner: 'bl' as const,
+                left: -handleSize / 2,
+                top: node.height - handleSize / 2,
+                cursor: 'nesw-resize' as const,
+              },
+            ].map(({ corner, left, top, cursor }) => (
               <div
-                key={`resize-${i}`}
+                key={`resize-${corner}`}
                 className="resize-handle"
-                onMouseDown={(e) => onResizeMouseDown(e, i)}
+                onMouseDown={(e) => onResizeMouseDown(e, corner)}
                 style={{
                   position: 'absolute',
-                  left: pos.left,
-                  top: pos.top,
+                  left,
+                  top,
                   width: handleSize,
                   height: handleSize,
                   backgroundColor: '#fff',
                   border: `${borderWidth}px solid ${selectionColor}`,
                   borderRadius: handleSize / 2,
-                  cursor: pos.cursor,
+                  cursor,
                   pointerEvents: 'auto',
                   zIndex: 10,
                 }}
@@ -779,9 +1043,32 @@ interface FloatingMenuProps {
   top: number
   editText: string
   onEditTextChange: (val: string) => void
+  onDelete: () => void
+  onExportFormat: (format: ExportFormat) => void | Promise<void>
 }
 
-function FloatingMenu({ left, top, editText, onEditTextChange }: FloatingMenuProps) {
+function FloatingMenu({
+  left,
+  top,
+  editText,
+  onEditTextChange,
+  onDelete,
+  onExportFormat,
+}: FloatingMenuProps) {
+  const [exportOpen, setExportOpen] = useState(false)
+  const [editPanelOpen, setEditPanelOpen] = useState(true)
+  const exportWrapRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!exportOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (exportWrapRef.current?.contains(e.target as Node)) return
+      setExportOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [exportOpen])
+
   return (
     <div
       className="floating-menu-wrapper only-button-group has-delete-button"
@@ -789,11 +1076,17 @@ function FloatingMenu({ left, top, editText, onEditTextChange }: FloatingMenuPro
     >
       <div className="floating-menu">
         <div className="flex-row" style={{ display: 'flex', alignItems: 'center' }}>
-          {/* Dashed frame icon button */}
+          {/* Dashed frame icon: toggle edit description panel */}
           <div className="frame-icon-container">
-            <div className="frame-icon-btn">
+            <button
+              type="button"
+              className={`menu-btn export-btn frame-icon-btn${!editPanelOpen ? ' is-open' : ''}`}
+              title={editPanelOpen ? '收起编辑描述' : '展开编辑描述'}
+              aria-expanded={editPanelOpen}
+              onClick={() => setEditPanelOpen((o) => !o)}
+            >
               <DashedFrameIcon />
-            </div>
+            </button>
           </div>
 
           {/* Main action buttons */}
@@ -820,44 +1113,95 @@ function FloatingMenu({ left, top, editText, onEditTextChange }: FloatingMenuPro
 
             <div className="separator" />
 
-            <div className="export-button-wrapper">
-              <button className="menu-btn export-btn">
+            <div className="export-button-wrapper" ref={exportWrapRef}>
+              <button
+                type="button"
+                className={`menu-btn export-btn${exportOpen ? ' is-open' : ''}`}
+                title="导出"
+                aria-expanded={exportOpen}
+                aria-haspopup="menu"
+                onClick={() => setExportOpen((o) => !o)}
+              >
                 <span className="btn-text">导出</span>
               </button>
+              {exportOpen && (
+                <div className="export-dropdown" role="menu">
+                  <button
+                    type="button"
+                    className="export-dropdown-item"
+                    role="menuitem"
+                    onClick={() => {
+                      void onExportFormat('png')
+                      setExportOpen(false)
+                    }}
+                  >
+                    PNG
+                  </button>
+                  <button
+                    type="button"
+                    className="export-dropdown-item"
+                    role="menuitem"
+                    onClick={() => {
+                      void onExportFormat('svg')
+                      setExportOpen(false)
+                    }}
+                  >
+                    SVG
+                  </button>
+                  <button
+                    type="button"
+                    className="export-dropdown-item"
+                    role="menuitem"
+                    onClick={() => {
+                      void onExportFormat('pdf')
+                      setExportOpen(false)
+                    }}
+                  >
+                    PDF
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>
 
         {/* Delete button */}
         <div className="menu-container delete-container">
-          <button className="menu-btn delete-btn">
+          <button
+            type="button"
+            className="menu-btn delete-btn"
+            title="删除"
+            onClick={onDelete}
+          >
             <DeleteIcon />
           </button>
         </div>
       </div>
 
       {/* Edit textarea */}
-      <div className="dimension-input-container">
-        <div className="edit-input-group">
-          <div className="edit-input-wrapper">
-            <textarea
-              className="edit-textarea"
-              placeholder="Describe what you want to Edit"
-              value={editText}
-              onChange={(e) => onEditTextChange(e.target.value)}
-            />
-            <div className="edit-input-bottom-row">
-              <button
-                className="menu-btn edit-apply-btn"
-                title="应用"
-                disabled={!editText.trim()}
-              >
-                <SubmitIcon />
-              </button>
+      {editPanelOpen && (
+        <div className="dimension-input-container" role="region" aria-label="编辑描述">
+          <div className="edit-input-group">
+            <div className="edit-input-wrapper">
+              <textarea
+                className="edit-textarea"
+                placeholder="Describe what you want to Edit"
+                value={editText}
+                onChange={(e) => onEditTextChange(e.target.value)}
+              />
+              <div className="edit-input-bottom-row">
+                <button
+                  className="menu-btn edit-apply-btn"
+                  title="应用"
+                  disabled={!editText.trim()}
+                >
+                  <SubmitIcon />
+                </button>
+              </div>
             </div>
           </div>
         </div>
-      </div>
+      )}
     </div>
   )
 }

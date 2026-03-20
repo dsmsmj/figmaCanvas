@@ -153,6 +153,12 @@ body {
   height: 100%;
 }
 
+.image-placeholder {
+  width: 100%;
+  height: 100%;
+  background: #ececec;
+}
+
 /* ===== Resize / Rotation Handles ===== */
 .resize-handle {
   box-sizing: border-box;
@@ -243,7 +249,6 @@ body {
 
 .menu-btn:hover:not(:disabled):not(.loading) {
   background: #f5f5f5;
-  height: 36px;
 }
 
 .menu-btn:active:not(:disabled):not(.loading) {
@@ -293,6 +298,7 @@ body {
   align-items: center;
   gap: 6px;
   height: 36px;
+  box-sizing: border-box;
   cursor: pointer;
   padding: 4px 12px;
   border-radius: 8px;
@@ -302,7 +308,12 @@ body {
   border: none;
 }
 
-.frame-icon-btn:hover {
+/* 与 .menu-btn 的 height:100% 叠加时保持与工具栏其它按钮一致高度 */
+.menu-btn.frame-icon-btn {
+  height: 36px;
+}
+
+.frame-icon-btn:hover:not(:disabled):not(.loading) {
   background: #f5f5f5;
 }
 
@@ -318,11 +329,56 @@ body {
   gap: 8px;
 }
 
+.menu-btn.export-btn.is-open {
+  color: #fff;
+  background: rgb(15, 127, 255);
+}
+
+.menu-btn.export-btn.is-open:hover:not(:disabled):not(.loading) {
+  color: #fff;
+  background: rgb(12, 108, 220);
+}
+
+.menu-btn.export-btn.is-open:active:not(:disabled):not(.loading) {
+  color: #fff;
+  background: rgb(10, 95, 200);
+}
+
 .dropdown-arrow {
   color: currentColor;
   width: 12px;
   height: 12px;
   transition: transform 0.15s;
+}
+
+.export-dropdown {
+  z-index: 200;
+  background: #fff;
+  border: 1px solid #eaeaea;
+  border-radius: 8px;
+  min-width: 120px;
+  padding: 4px 0;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+}
+
+.export-dropdown-item {
+  color: #232425;
+  cursor: pointer;
+  text-align: left;
+  background: transparent;
+  border: none;
+  width: 100%;
+  padding: 8px 14px;
+  font-family: Arial, sans-serif;
+  font-size: 14px;
+  display: block;
+}
+
+.export-dropdown-item:hover {
+  background: #f5f5f5;
 }
 
 
@@ -397,8 +453,8 @@ body {
   cursor: pointer;
 }
 
-.edit-apply-btn:hover {
-  opacity: 0.8;
+.edit-apply-btn:not(:disabled):hover {
+  background: rgb(58, 58, 58) !important;
 }
 
 .edit-apply-btn:disabled {
