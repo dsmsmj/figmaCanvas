@@ -7,7 +7,12 @@ import {
   safeExportBaseName,
   type ExportFormat,
 } from './exportFrame'
-import './App.css'
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from '@/components/ui/dropdown-menu'
 
 /* ============================
    SVG Icon Components
@@ -82,7 +87,7 @@ const CloseIcon = () => (
 )
 
 const AiEditIcon = () => (
-  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" className="menu-icon">
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" className="shrink-0 w-5 h-5">
     <path d="M17.4487 15.625H2.78711C2.48292 15.625 2.23633 15.8716 2.23633 16.1758V17.3322C2.23633 17.6365 2.48292 17.8831 2.78711 17.8831H17.4487C17.7528 17.8831 17.9994 17.6365 17.9994 17.3322V16.1758C17.9994 15.8716 17.7528 15.625 17.4487 15.625Z" fill="currentColor" />
     <path d="M7.13547 13.3937C7.04726 13.3937 6.97279 13.329 6.95906 13.2408C6.38475 9.44404 5.9692 9.10886 2.19993 8.54043C2.08428 8.52278 1.99805 8.42282 1.99805 8.30521C1.99805 8.18761 2.08428 8.08765 2.19993 8.07C5.94961 7.50354 6.28282 7.16836 6.8493 3.42065C6.86694 3.305 6.96689 3.21875 7.0845 3.21875C7.20211 3.21875 7.30207 3.305 7.31971 3.42065C7.88619 7.16836 8.22136 7.50354 11.9691 8.07C12.0847 8.08765 12.171 8.18761 12.171 8.30521C12.171 8.42282 12.0847 8.52278 11.9691 8.54043C8.20373 9.10886 7.88226 9.44404 7.31187 13.2408C7.29816 13.327 7.22366 13.3937 7.13547 13.3937Z" fill="currentColor" />
     <path d="M14.2849 8.3742C14.2299 8.3742 14.183 8.33303 14.1751 8.27814C13.8164 5.90643 13.5556 5.69669 11.2016 5.34192C11.129 5.33015 11.0742 5.26939 11.0742 5.19491C11.0742 5.12239 11.1272 5.05966 11.2016 5.0479C13.5439 4.69508 13.7537 4.48535 14.1065 2.14304C14.1183 2.07051 14.179 2.01562 14.2535 2.01562C14.3261 2.01562 14.3888 2.06855 14.4005 2.14304C14.7533 4.48535 14.963 4.69508 17.3054 5.0479C17.3779 5.05966 17.4328 5.12043 17.4328 5.19491C17.4328 5.26743 17.3799 5.33015 17.3054 5.34192C14.9533 5.69669 14.7513 5.90643 14.3946 8.27814C14.3868 8.33303 14.3397 8.3742 14.2849 8.3742Z" fill="currentColor" />
@@ -112,13 +117,13 @@ const SubmitIcon = () => (
 )
 
 const DashedFrameIcon = () => (
-  <svg width="16" height="17" viewBox="0 0 16 17" fill="none" xmlns="http://www.w3.org/2000/svg" className="menu-icon">
+  <svg width="16" height="17" viewBox="0 0 16 17" fill="none" xmlns="http://www.w3.org/2000/svg" className="shrink-0 w-5 h-5">
     <rect x="2.08984" y="3" width="11" height="11" rx="1.1" stroke="currentColor" strokeDasharray="2.8 2.8" />
   </svg>
 )
 
 const DropdownArrowIcon = () => (
-  <svg className="dropdown-arrow" width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <svg className="text-current w-3 h-3 transition-transform duration-150" width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
     <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
   </svg>
 )
@@ -755,11 +760,11 @@ function App() {
 
   // --- Render ---
   return (
-    <div className="canvas-container">
+    <div className="w-full h-full relative overflow-hidden">
       {/* Viewport */}
       <div
         ref={viewportRef}
-        className="viewport"
+        className="viewport w-full h-full relative overflow-hidden [background-image:radial-gradient(circle,#ccc_1px,transparent_1px)]"
         style={{
           backgroundPosition: `${offset.x}px ${offset.y}px`,
           backgroundSize: `${15 * scale}px ${15 * scale}px`,
@@ -780,7 +785,7 @@ function App() {
 
         {/* Canvas Content Layer */}
         <div
-          className="locating-container"
+          className="locating-container origin-top-left [--text-node-default-line-height:1]"
           style={{
             transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})`,
           }}
@@ -838,40 +843,62 @@ function TopToolbar({
   onFitCanvas,
   onAddFrame,
 }: TopToolbarProps) {
+  const btnBase =
+    'cursor-pointer border flex justify-center items-center w-10 h-10 transition-all duration-150 ease-[cubic-bezier(0.4,0,0.2,1)] hover:-translate-y-px active:translate-y-0 active:shadow-[0_1px_4px_rgba(0,0,0,0.05)]'
+  const btnInactive =
+    'text-[#232425] bg-[#fcfcfc] border-[#eaeaea] rounded-lg hover:bg-[#f5f5f5]'
+  const btnActive =
+    'text-white bg-[#232425] border-[#e2e8f0] rounded-xl hover:bg-[#1a1b1c] active:bg-[#0f1011]'
+
   return (
-    <div className="canvas-top-toolbar has-content">
+    <div className="backdrop-blur-[5px] z-[100] bg-white/45 border border-white/20 rounded-xl flex flex-row flex-wrap content-start items-start gap-2 h-14 px-3 py-2 absolute top-[19px] left-1/2 -translate-x-1/2 max-[1220px]:bg-transparent max-[1220px]:border-0 max-[1220px]:h-auto max-[1220px]:p-0 max-[1220px]:left-full max-[1220px]:translate-x-[calc(-100%-16px)]">
       <button
-        className={`toolbar-button mobile-invisible ${toolMode === 'select' ? 'active' : ''}`}
+        className={`${btnBase} ${toolMode === 'select' ? btnActive : btnInactive} max-[1220px]:hidden`}
         title="选择模式"
         onClick={() => onToolModeChange('select')}
       >
         <SelectIcon />
       </button>
       <button
-        className={`toolbar-button mobile-invisible ${toolMode === 'hand' ? 'active' : ''}`}
+        className={`${btnBase} ${toolMode === 'hand' ? btnActive : btnInactive} max-[1220px]:hidden`}
         title="手型模式"
         onClick={() => onToolModeChange('hand')}
       >
         <HandIcon />
       </button>
-      <button className="toolbar-button mobile-invisible" title="放大" onClick={onZoomIn}>
+      <button
+        className={`${btnBase} ${btnInactive} max-[1220px]:hidden`}
+        title="放大"
+        onClick={onZoomIn}
+      >
         <ZoomInIcon />
       </button>
-      <button className="toolbar-button mobile-invisible" title="缩小" onClick={onZoomOut}>
+      <button
+        className={`${btnBase} ${btnInactive} max-[1220px]:hidden`}
+        title="缩小"
+        onClick={onZoomOut}
+      >
         <ZoomOutIcon />
       </button>
       <button
         type="button"
-        className="toolbar-button mobile-invisible"
+        className={`${btnBase} ${btnInactive} max-[1220px]:hidden`}
         title="添加画框"
         onClick={onAddFrame}
       >
         <AddFrameIcon />
       </button>
-      <button className="toolbar-button mobile-invisible" title="全画布" onClick={onFitCanvas}>
+      <button
+        className={`${btnBase} ${btnInactive} max-[1220px]:hidden`}
+        title="全画布"
+        onClick={onFitCanvas}
+      >
         <FitCanvasIcon />
       </button>
-      <button className="toolbar-button mobile-only" title="关闭">
+      <button
+        className={`${btnBase} ${btnInactive} hidden max-[1220px]:block`}
+        title="关闭"
+      >
         <CloseIcon />
       </button>
     </div>
@@ -912,7 +939,7 @@ function CanvasNode({
       onMouseDown={onMouseDown}
     >
       <div
-        className="content-wrapper"
+        className="relative"
         style={{
           width: node.width,
           height: node.height,
@@ -922,7 +949,7 @@ function CanvasNode({
       >
         {/* Page Title */}
         <div
-          className="page-title"
+          className="pointer-events-auto overflow-hidden text-ellipsis select-none whitespace-nowrap absolute"
           style={{
             transform: `scale(${titleScale})`,
             transformOrigin: 'left bottom',
@@ -931,16 +958,16 @@ function CanvasNode({
             maxWidth: 307.2,
           }}
         >
-          <span className="page-title-text">{node.title}</span>
+          <span className="text-[#999] font-sans text-[13px] leading-none">{node.title}</span>
         </div>
 
         {/* Image */}
-        <div className="image-node">
-          <div className="image-container">
+        <div className="overflow-hidden flex justify-center items-center w-full h-full relative">
+          <div className="flex justify-center items-center w-full h-full relative">
             {node.imageSrc ? (
-              <img src={node.imageSrc} alt={node.title} className="image-content" draggable={false} />
+              <img src={node.imageSrc} alt={node.title} className="object-contain select-none w-full h-full" draggable={false} />
             ) : (
-              <div className="image-placeholder" aria-hidden />
+              <div className="w-full h-full bg-[#ececec]" aria-hidden />
             )}
           </div>
         </div>
@@ -976,7 +1003,7 @@ function CanvasNode({
             ].map(({ corner, left, top, cursor }) => (
               <div
                 key={`resize-${corner}`}
-                className="resize-handle"
+                className="box-border select-none hover:scale-[1.2]"
                 onMouseDown={(e) => onResizeMouseDown(e, corner)}
                 style={{
                   position: 'absolute',
@@ -996,7 +1023,6 @@ function CanvasNode({
 
             {/* Rotation line (12 o'clock direction) */}
             <div
-              className="rotation-line"
               style={{
                 position: 'absolute',
                 left: node.width / 2 - borderWidth / 2,
@@ -1011,7 +1037,7 @@ function CanvasNode({
 
             {/* Rotation handle */}
             <div
-              className="rotation-handle"
+              className="box-border select-none hover:scale-[1.2]"
               onMouseDown={onRotateMouseDown}
               style={{
                 position: 'absolute',
@@ -1055,32 +1081,23 @@ function FloatingMenu({
   onDelete,
   onExportFormat,
 }: FloatingMenuProps) {
-  const [exportOpen, setExportOpen] = useState(false)
   const [editPanelOpen, setEditPanelOpen] = useState(true)
-  const exportWrapRef = useRef<HTMLDivElement>(null)
 
-  useEffect(() => {
-    if (!exportOpen) return
-    const onDown = (e: MouseEvent) => {
-      if (exportWrapRef.current?.contains(e.target as Node)) return
-      setExportOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [exportOpen])
+  const menuBtnBase =
+    'text-inherit cursor-pointer whitespace-nowrap bg-transparent border-0 rounded-lg flex items-center gap-1.5 h-full px-3 py-1 font-[Arial,sans-serif] text-sm enabled:hover:bg-[#f5f5f5] enabled:active:bg-[#e8e9ea] enabled:active:translate-y-px focus:outline-none disabled:cursor-not-allowed disabled:opacity-60'
 
   return (
     <div
-      className="floating-menu-wrapper only-button-group has-delete-button"
+      className="z-[100] flex flex-col gap-[18px] absolute translate-x-[calc(28px-50%)]"
       style={{ left, top }}
     >
-      <div className="floating-menu">
-        <div className="flex-row" style={{ display: 'flex', alignItems: 'center' }}>
+      <div className="rounded-lg flex items-center gap-3">
+        <div className="flex items-center">
           {/* Dashed frame icon: toggle edit description panel */}
-          <div className="frame-icon-container">
+          <div className="bg-white p-0.5 flex items-center justify-center rounded-xl mr-5 shadow-[0_2px_8px_rgba(0,0,0,0.1)]">
             <button
               type="button"
-              className={`menu-btn export-btn frame-icon-btn${!editPanelOpen ? ' is-open' : ''}`}
+              className={`flex items-center gap-1.5 h-9 box-border cursor-pointer px-3 py-1 rounded-lg whitespace-nowrap transition-colors bg-white border-0 enabled:hover:bg-[#f5f5f5]${!editPanelOpen ? ' is-open' : ''}`}
               title={editPanelOpen ? '收起编辑描述' : '展开编辑描述'}
               aria-expanded={editPanelOpen}
               onClick={() => setEditPanelOpen((o) => !o)}
@@ -1090,86 +1107,103 @@ function FloatingMenu({
           </div>
 
           {/* Main action buttons */}
-          <div className="menu-container">
-            <button className="menu-btn">
+          <div className="text-[#232425] bg-white border border-[#eaeaea] rounded-xl flex items-center h-10 p-0.5 shadow-[0_2px_8px_rgba(0,0,0,0.1)]">
+            <button className={menuBtnBase}>
               <AiEditIcon />
-              <span className="btn-text">编辑文本</span>
+              <span className="font-[Arial] text-sm z-[1] tracking-normal font-normal leading-[150%] relative">编辑文本</span>
             </button>
 
-            <div className="separator" />
+            <div className="bg-[#eaeaea] w-px h-4 mx-1.5" />
 
-            <button className="menu-btn">
-              <span className="btn-text">工具箱</span>
+            <button className={menuBtnBase}>
+              <span className="font-[Arial] text-sm z-[1] tracking-normal font-normal leading-[150%] relative">工具箱</span>
             </button>
 
-            <div className="separator mobile-invisible" />
+            <div className="bg-[#eaeaea] w-px h-4 mx-1.5 max-[1220px]:hidden" />
 
-            <div className="add-button-wrapper mobile-invisible">
-              <button className="menu-btn add-btn">
-                <span className="btn-text">添加元素</span>
-                <DropdownArrowIcon />
-              </button>
+            <div className="max-[1220px]:hidden">
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  className={`${menuBtnBase} gap-2 data-[popup-open]:text-white data-[popup-open]:bg-[rgb(15,127,255)] data-[popup-open]:hover:bg-[rgb(12,108,220)]`}
+                >
+                  <span className="font-[Arial] text-sm z-[1] tracking-normal font-normal leading-[150%] relative">添加元素</span>
+                  <DropdownArrowIcon />
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" sideOffset={6}>
+                  <DropdownMenuItem>
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <mask id="add-el-text-mask" style={{ maskType: 'alpha' }} maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16">
+                        <rect width="16" height="16" fill="#D9D9D9" />
+                      </mask>
+                      <g mask="url(#add-el-text-mask)">
+                        <path d="M3 5V4C3 3.44772 3.44772 3 4 3H12C12.5523 3 13 3.44772 13 4V5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                        <path d="M6 12H10" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                        <path d="M8 3.5V11.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                      </g>
+                    </svg>
+                    添加文本
+                  </DropdownMenuItem>
+                  <DropdownMenuItem>
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <mask id="add-el-img-mask" style={{ maskType: 'alpha' }} maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16">
+                        <rect width="16" height="16" fill="#D9D9D9" />
+                      </mask>
+                      <g mask="url(#add-el-img-mask)">
+                        <path d="M3 5V11C3 12.1046 3.89543 13 5 13H11C12.1046 13 13 12.1046 13 11V5C13 3.89543 12.1046 3 11 3H5C3.89543 3 3 3.89543 3 5Z" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                        <path d="M8.5 9.50005C9.5 8.50005 12 8.5 13 9.99999" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                        <path d="M3.5 7C5.33333 7 9.1 8.2 9.5 13" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                      </g>
+                    </svg>
+                    添加图片
+                  </DropdownMenuItem>
+                  <DropdownMenuItem>
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <mask id="add-el-draw-mask" style={{ maskType: 'alpha' }} maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16">
+                        <rect width="16" height="16" fill="#D9D9D9" />
+                      </mask>
+                      <g mask="url(#add-el-draw-mask)">
+                        <path d="M6.68343 10.5959L10.2621 4.39743C10.6764 3.67999 10.4305 2.7626 9.7131 2.34839C8.99566 1.93418 8.07828 2.17999 7.66406 2.89743L4.08535 9.09593C3.96113 9.31109 3.87809 9.54751 3.84047 9.79308L3.55607 11.6496C3.51041 11.9476 3.65228 12.2431 3.91337 12.3938C4.17446 12.5446 4.50129 12.5197 4.73654 12.3311L6.20212 11.1566C6.39599 11.0012 6.55921 10.8111 6.68343 10.5959Z" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                        <path d="M4 9L6.5 10.5" stroke="currentColor" strokeWidth="1.2" />
+                        <path d="M4 12.5235C9.29381 14.7565 9.29381 8.17201 14 12.5235" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                      </g>
+                    </svg>
+                    涂鸦
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
 
-            <div className="separator" />
+            <div className="bg-[#eaeaea] w-px h-4 mx-1.5" />
 
-            <div className="export-button-wrapper" ref={exportWrapRef}>
-              <button
-                type="button"
-                className={`menu-btn export-btn${exportOpen ? ' is-open' : ''}`}
+            {/* Export dropdown — shadcn DropdownMenu */}
+            <DropdownMenu>
+              <DropdownMenuTrigger
+                className={`${menuBtnBase} gap-2 data-[popup-open]:text-white data-[popup-open]:bg-[rgb(15,127,255)] data-[popup-open]:hover:bg-[rgb(12,108,220)]`}
                 title="导出"
-                aria-expanded={exportOpen}
-                aria-haspopup="menu"
-                onClick={() => setExportOpen((o) => !o)}
               >
-                <span className="btn-text">导出</span>
-              </button>
-              {exportOpen && (
-                <div className="export-dropdown" role="menu">
-                  <button
-                    type="button"
-                    className="export-dropdown-item"
-                    role="menuitem"
-                    onClick={() => {
-                      void onExportFormat('png')
-                      setExportOpen(false)
-                    }}
-                  >
-                    PNG
-                  </button>
-                  <button
-                    type="button"
-                    className="export-dropdown-item"
-                    role="menuitem"
-                    onClick={() => {
-                      void onExportFormat('svg')
-                      setExportOpen(false)
-                    }}
-                  >
-                    SVG
-                  </button>
-                  <button
-                    type="button"
-                    className="export-dropdown-item"
-                    role="menuitem"
-                    onClick={() => {
-                      void onExportFormat('pdf')
-                      setExportOpen(false)
-                    }}
-                  >
-                    PDF
-                  </button>
-                </div>
-              )}
-            </div>
+                <span className="font-[Arial] text-sm z-[1] tracking-normal font-normal leading-[150%] relative">导出</span>
+                <DropdownArrowIcon />
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" sideOffset={6}>
+                <DropdownMenuItem onSelect={() => void onExportFormat('png')}>
+                  PNG
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => void onExportFormat('svg')}>
+                  SVG
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => void onExportFormat('pdf')}>
+                  PDF
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
 
         {/* Delete button */}
-        <div className="menu-container delete-container">
+        <div className="text-[#232425] bg-white border border-[#eaeaea] rounded-xl flex items-center h-10 p-0.5 shadow-[0_2px_8px_rgba(0,0,0,0.1)]">
           <button
             type="button"
-            className="menu-btn delete-btn"
+            className={`${menuBtnBase} [&_svg]:w-4 [&_svg]:h-4`}
             title="删除"
             onClick={onDelete}
           >
@@ -1180,18 +1214,18 @@ function FloatingMenu({
 
       {/* Edit textarea */}
       {editPanelOpen && (
-        <div className="dimension-input-container" role="region" aria-label="编辑描述">
-          <div className="edit-input-group">
-            <div className="edit-input-wrapper">
+        <div className="relative">
+          <div className="w-full min-w-[316px] flex max-[768px]:min-w-[280px]">
+            <div className="bg-white rounded-xl flex flex-col gap-3 w-full p-3 transition-[border-color,box-shadow] duration-150 relative shadow-[0_4px_10px_rgba(0,0,0,0.15)] max-[768px]:p-2.5">
               <textarea
-                className="edit-textarea"
+                className="resize-none bg-transparent border-0 outline-none flex-1 max-h-[120px] p-0 font-inherit text-sm leading-none placeholder:text-[#ccc] placeholder:opacity-100"
                 placeholder="Describe what you want to Edit"
                 value={editText}
                 onChange={(e) => onEditTextChange(e.target.value)}
               />
-              <div className="edit-input-bottom-row">
+              <div className="flex justify-center items-center gap-2">
                 <button
-                  className="menu-btn edit-apply-btn"
+                  className="bg-[rgb(38,38,38)] text-white rounded-[35%] border-0 flex justify-center items-center w-7 h-7 ml-auto p-0 cursor-pointer enabled:hover:bg-[rgb(58,58,58)] disabled:bg-[rgb(244,244,244)] disabled:text-[rgb(144,148,153)] disabled:cursor-not-allowed"
                   title="应用"
                   disabled={!editText.trim()}
                 >
