@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import canvasImg from './assets/imges.png'
 import {
   downloadFramePdf,
@@ -62,6 +62,14 @@ const AddFrameIcon = () => (
       <path d="M16.4937 2V7" stroke="#232425" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M14 4.5065L18.9935 4.5" stroke="#232425" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
     </g>
+  </svg>
+)
+
+const DoodleIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M8.35429 13.245L12.8276 5.49679C13.3455 4.59999 13.0382 3.45325 12.1414 2.93549C11.2446 2.41773 10.0978 2.72499 9.58008 3.62179L5.10669 11.3699C4.95141 11.6389 4.84761 11.9344 4.80059 12.2413L4.44509 14.562C4.38801 14.9345 4.56535 15.3039 4.89171 15.4923C5.21808 15.6807 5.62661 15.6496 5.92068 15.4139L7.75265 13.9458C7.99499 13.7515 8.19901 13.5139 8.35429 13.245Z" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+    <path d="M5 11.25L8.125 13.125" stroke="currentColor" strokeWidth="1.25" />
+    <path d="M5 15.6544C11.6173 18.4456 11.6173 10.215 17.5 15.6544" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
   </svg>
 )
 
@@ -189,6 +197,21 @@ function normalizeVec(v: Vec2): Vec2 {
   const len = Math.hypot(v.x, v.y)
   if (len < 1e-12) return Vec2.of(1, 0)
   return Vec2.of(v.x / len, v.y / len)
+}
+
+/** Convert an array of [x,y] points to a smooth SVG path using quadratic midpoint interpolation. */
+function pointsToSvgPath(pts: [number, number][]): string {
+  if (pts.length === 0) return ''
+  if (pts.length === 1) return `M${pts[0][0]} ${pts[0][1]}L${pts[0][0]} ${pts[0][1]}`
+  let d = `M${pts[0][0]} ${pts[0][1]}`
+  if (pts.length === 2) return d + `L${pts[1][0]} ${pts[1][1]}`
+  for (let i = 1; i < pts.length - 1; i++) {
+    const mx = (pts[i][0] + pts[i + 1][0]) / 2
+    const my = (pts[i][1] + pts[i + 1][1]) / 2
+    d += `Q${pts[i][0]} ${pts[i][1]} ${mx} ${my}`
+  }
+  const last = pts[pts.length - 1]
+  return d + `L${last[0]} ${last[1]}`
 }
 
 /** Convert viewport-local pixel coords to canvas (world) coords. */
@@ -343,6 +366,7 @@ type DragAction =
   | { type: 'drawframe'; startCanvas: Vec2 }
   | { type: 'moveframe' }
   | { type: 'resizeframe'; dir: FrameDir }
+  | { type: 'doodle' }
 
 interface NodeData {
   id: string
@@ -354,6 +378,19 @@ interface NodeData {
   title: string
   /** 无则渲染空白画框 */
   imageSrc?: string
+  /** 文本节点 / 图片节点 / 涂鸦节点 */
+  type?: 'text' | 'image' | 'doodle'
+  textContent?: string
+  fontSize?: number
+  textColor?: string
+  fontFamily?: string
+  fontWeight?: 'normal' | 'bold'
+  fontStyle?: 'normal' | 'italic'
+  textAlign?: 'left' | 'center' | 'right'
+  /** 涂鸦笔画 */
+  doodleStrokes?: { d: string; color: string; width: number }[]
+  /** 涂鸦创建时的原始尺寸（用于 viewBox 缩放） */
+  doodleViewBox?: [number, number]
 }
 
 /* ============================
@@ -421,6 +458,20 @@ function App() {
   /** Canvas-space pointer position at the start of a frame draw/move/resize drag. */
   const frameStartCanvas = useRef<Vec2 | null>(null)
 
+  // --- Doodle state ---
+  const [doodleMode, setDoodleMode] = useState(false)
+  const doodleModeRef = useRef(false)
+  doodleModeRef.current = doodleMode
+  const doodleAllStrokes = useRef<{ points: [number, number][]; color: string; width: number }[]>([])
+  const doodleUndoStack = useRef<{ points: [number, number][]; color: string; width: number }[]>([])
+  const doodleCurrentPoints = useRef<[number, number][]>([])
+  const doodleLivePathRef = useRef<SVGPathElement>(null)
+  const [doodleRenderedStrokes, setDoodleRenderedStrokes] = useState<{ d: string; color: string; width: number }[]>([])
+  /** 进入涂鸦模式时的锚点节点快照，用于工具栏定位 */
+  const doodleAnchorNode = useRef<NodeData | null>(null)
+  const DOODLE_COLOR = '#000000'
+  const DOODLE_WIDTH = 8
+
   const handleAddFrame = useCallback(() => {
     const w = DEFAULT_NEW_FRAME_W
     const h = DEFAULT_NEW_FRAME_H
@@ -446,6 +497,212 @@ function App() {
     }
     setNodes((prev) => [...prev, newNode])
     setSelectedNodeId(id)
+  }, [])
+
+  const handleAddTextElement = useCallback(() => {
+    /** 默认字号（画布坐标 px） */
+    const FONT_SIZE = 80
+    /** "文本" 两个汉字，全角字符宽度 ≈ 1em，行高 1 → 高度 = FONT_SIZE */
+    const DEFAULT_TEXT = '文本'
+    const DEFAULT_W = DEFAULT_TEXT.length * FONT_SIZE
+    const DEFAULT_H = FONT_SIZE
+    const ref = selectedNodeRef.current
+    let x = 100
+    let y = 100
+    if (ref) {
+      x = ref.x + (ref.width  - DEFAULT_W) / 2
+      y = ref.y + (ref.height - DEFAULT_H) / 2
+    } else {
+      const rect = viewportRef.current?.getBoundingClientRect()
+      const t = viewportTransformRef.current
+      if (rect) {
+        x = (rect.width  / 2 - t.ox) / t.scale - DEFAULT_W / 2
+        y = (rect.height / 2 - t.oy) / t.scale - DEFAULT_H / 2
+      }
+    }
+    const id = `node-${Date.now()}`
+    setNodes(prev => [...prev, {
+      id, x, y,
+      width: DEFAULT_W,
+      height: DEFAULT_H,
+      rotation: 0,
+      title: '文本',
+      type: 'text' as const,
+      textContent: DEFAULT_TEXT,
+      fontSize: FONT_SIZE,
+      textColor: '#000000',
+      fontFamily: 'Arial, sans-serif',
+      fontWeight: 'normal' as const,
+      fontStyle: 'normal' as const,
+      textAlign: 'left' as const,
+    }])
+    setSelectedNodeId(id)
+  }, [])
+
+  const handleAddImageElement = useCallback(() => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = 'image/*'
+    input.onchange = () => {
+      const file = input.files?.[0]
+      if (!file) return
+      const reader = new FileReader()
+      reader.onload = () => {
+        const dataUrl = reader.result as string
+        const img = new Image()
+        img.onload = () => {
+          const MAX_SIZE = 500
+          let w = img.naturalWidth
+          let h = img.naturalHeight
+          if (w > MAX_SIZE || h > MAX_SIZE) {
+            const ratio = Math.min(MAX_SIZE / w, MAX_SIZE / h)
+            w = Math.round(w * ratio)
+            h = Math.round(h * ratio)
+          }
+
+          const ref = selectedNodeRef.current
+          let x = 100
+          let y = 100
+          if (ref) {
+            x = ref.x + (ref.width - w) / 2
+            y = ref.y + (ref.height - h) / 2
+          } else {
+            const rect = viewportRef.current?.getBoundingClientRect()
+            const t = viewportTransformRef.current
+            if (rect) {
+              x = (rect.width / 2 - t.ox) / t.scale - w / 2
+              y = (rect.height / 2 - t.oy) / t.scale - h / 2
+            }
+          }
+
+          const id = `node-${Date.now()}`
+          setNodes(prev => [...prev, {
+            id, x, y,
+            width: w,
+            height: h,
+            rotation: 0,
+            title: '图片',
+            type: 'image' as const,
+            imageSrc: dataUrl,
+          }])
+          setSelectedNodeId(id)
+        }
+        img.src = dataUrl
+      }
+      reader.readAsDataURL(file)
+    }
+    input.click()
+  }, [])
+
+  const handleStartDoodleMode = useCallback(() => {
+    doodleAnchorNode.current = selectedNodeRef.current
+    setSelectedNodeId(null)
+    setDoodleMode(true)
+    doodleAllStrokes.current = []
+    doodleUndoStack.current = []
+    doodleCurrentPoints.current = []
+    setDoodleRenderedStrokes([])
+  }, [])
+
+  const handleFinishDoodle = useCallback(() => {
+    const strokes = doodleAllStrokes.current
+    const anchorId = doodleAnchorNode.current?.id ?? null
+    setDoodleMode(false)
+    setDoodleRenderedStrokes([])
+    doodleAllStrokes.current = []
+    doodleUndoStack.current = []
+    doodleCurrentPoints.current = []
+    if (strokes.length === 0) {
+      setSelectedNodeId(anchorId)
+      return
+    }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const s of strokes) {
+      for (const [px, py] of s.points) {
+        if (px < minX) minX = px
+        if (py < minY) minY = py
+        if (px > maxX) maxX = px
+        if (py > maxY) maxY = py
+      }
+    }
+    const pad = DOODLE_WIDTH / 2 + 2
+    minX -= pad; minY -= pad; maxX += pad; maxY += pad
+    const w = maxX - minX
+    const h = maxY - minY
+    const doodleStrokes = strokes.map(s => ({
+      d: pointsToSvgPath(s.points.map(([px, py]) => [px - minX, py - minY] as [number, number])),
+      color: s.color,
+      width: s.width,
+    }))
+    const id = `node-${Date.now()}`
+    setNodes(prev => [...prev, {
+      id, x: minX, y: minY, width: w, height: h,
+      rotation: 0,
+      title: '涂鸦',
+      type: 'doodle' as const,
+      doodleStrokes,
+      doodleViewBox: [w, h],
+    }])
+    // 退出涂鸦后恢复到进入前选中的节点
+    setSelectedNodeId(anchorId)
+  }, [])
+
+  const syncDoodleRendered = () => {
+    setDoodleRenderedStrokes(doodleAllStrokes.current.map(s => ({
+      d: pointsToSvgPath(s.points), color: s.color, width: s.width,
+    })))
+  }
+
+  const handleDoodleUndo = useCallback(() => {
+    if (doodleAllStrokes.current.length === 0) return
+    doodleUndoStack.current.push(doodleAllStrokes.current.pop()!)
+    syncDoodleRendered()
+  }, [])
+
+  const handleDoodleRedo = useCallback(() => {
+    if (doodleUndoStack.current.length === 0) return
+    doodleAllStrokes.current.push(doodleUndoStack.current.pop()!)
+    syncDoodleRendered()
+  }, [])
+
+  const handleDoodleClear = useCallback(() => {
+    doodleAllStrokes.current = []
+    doodleUndoStack.current = []
+    doodleCurrentPoints.current = []
+    setDoodleRenderedStrokes([])
+    if (doodleLivePathRef.current) doodleLivePathRef.current.setAttribute('d', '')
+  }, [])
+
+  const handleTextContentChange = useCallback((id: string, text: string) => {
+    setNodes(prev => prev.map(n => n.id === id ? { ...n, textContent: text } : n))
+  }, [])
+
+  const handleFontSizeChange = useCallback((id: string, newSize: number) => {
+    setNodes(prev => prev.map(n => {
+      if (n.id !== id) return n
+      const ratio = newSize / (n.fontSize ?? 80)
+      return { ...n, fontSize: newSize, height: Math.round(n.height * ratio) }
+    }))
+  }, [])
+
+  const handleTextColorChange = useCallback((id: string, color: string) => {
+    setNodes(prev => prev.map(n => n.id === id ? { ...n, textColor: color } : n))
+  }, [])
+
+  const handleFontFamilyChange = useCallback((id: string, family: string) => {
+    setNodes(prev => prev.map(n => n.id === id ? { ...n, fontFamily: family } : n))
+  }, [])
+
+  const handleFontWeightChange = useCallback((id: string, weight: 'normal' | 'bold') => {
+    setNodes(prev => prev.map(n => n.id === id ? { ...n, fontWeight: weight } : n))
+  }, [])
+
+  const handleFontStyleChange = useCallback((id: string, style: 'normal' | 'italic') => {
+    setNodes(prev => prev.map(n => n.id === id ? { ...n, fontStyle: style } : n))
+  }, [])
+
+  const handleTextAlignChange = useCallback((id: string, align: 'left' | 'center' | 'right') => {
+    setNodes(prev => prev.map(n => n.id === id ? { ...n, textAlign: align } : n))
   }, [])
 
   const handleDeleteSelected = useCallback(() => {
@@ -513,6 +770,35 @@ function App() {
     }
     : { left: 0, top: 0 }
 
+  // Doodle floating toolbar position: below the anchor node (or bottom-center)
+  const doodleToolbarPos = (() => {
+    const an = doodleAnchorNode.current
+    if (!an) return null
+    return {
+      left: offset.x + (an.x + an.width / 2) * scale,
+      top: offset.y + (an.y + an.height + 80) * scale,
+    }
+  })()
+
+  // Text toolbar position: find the outermost containing frame so the panel
+  // always appears to the right of the visible boundary, never inside a frame.
+  const textToolbarPos = (() => {
+    if (!selectedNode || selectedNode.type !== 'text') return toolboxPos
+    const cx = selectedNode.x + selectedNode.width / 2
+    const cy = selectedNode.y + selectedNode.height / 2
+    // Pick the non-text node whose right edge is furthest right and still
+    // contains the text node's centre – that is the "parent" frame.
+    const container = nodes
+      .filter(n => n.id !== selectedNode.id && !n.type)
+      .filter(n => cx >= n.x && cx <= n.x + n.width && cy >= n.y && cy <= n.y + n.height)
+      .sort((a, b) => (b.x + b.width) - (a.x + a.width))[0]
+    const refNode = container ?? selectedNode
+    return {
+      left: offset.x + (refNode.x + refNode.width) * scale + 12,
+      top:  offset.y + selectedNode.y * scale,
+    }
+  })()
+
   // --- Helper: update a single node ---
   const updateNode = useCallback((id: string, patch: Partial<NodeData>) => {
     setNodes((prev) => prev.map((n) => (n.id === id ? { ...n, ...patch } : n)))
@@ -552,6 +838,22 @@ function App() {
         return
       }
 
+      if (doodleModeRef.current && e.button === 0) {
+        const rect = viewportRef.current?.getBoundingClientRect()
+        if (!rect) return
+        const t = viewportTransformRef.current
+        let cp = screenToCanvas(e.clientX - rect.left, e.clientY - rect.top, t.ox, t.oy, t.scale)
+        const anchor = doodleAnchorNode.current
+        if (anchor) cp = clampToAABB(cp, getNodeAABB(anchor))
+        doodleCurrentPoints.current = [[cp.x, cp.y]]
+        dragAction.current = { type: 'doodle' }
+        if (doodleLivePathRef.current) {
+          doodleLivePathRef.current.setAttribute('d', `M${cp.x} ${cp.y}`)
+        }
+        e.preventDefault()
+        return
+      }
+
       if (framingModeRef.current && e.button === 0) {
         const rect = viewportRef.current?.getBoundingClientRect()
         if (!rect) return
@@ -586,6 +888,22 @@ function App() {
   // --- Node body mouse down (select mode: select + drag to move) ---
   const handleNodeMouseDown = useCallback(
     (e: React.MouseEvent, nodeId: string) => {
+      if (doodleModeRef.current && e.button === 0) {
+        e.stopPropagation()
+        e.preventDefault()
+        const rect = viewportRef.current?.getBoundingClientRect()
+        if (!rect) return
+        const t = viewportTransformRef.current
+        let cp = screenToCanvas(e.clientX - rect.left, e.clientY - rect.top, t.ox, t.oy, t.scale)
+        const anchor = doodleAnchorNode.current
+        if (anchor) cp = clampToAABB(cp, getNodeAABB(anchor))
+        doodleCurrentPoints.current = [[cp.x, cp.y]]
+        dragAction.current = { type: 'doodle' }
+        if (doodleLivePathRef.current) {
+          doodleLivePathRef.current.setAttribute('d', `M${cp.x} ${cp.y}`)
+        }
+        return
+      }
       if (toolMode !== 'select') return
       e.stopPropagation()
       e.preventDefault()
@@ -727,13 +1045,24 @@ function App() {
         lastMousePos.current = { x: e.clientX, y: e.clientY }
       } else if (action.type === 'move') {
         const t = viewportTransformRef.current
-        setNodes((prev) =>
-          prev.map((n) =>
-            n.id === action.nodeId
-              ? { ...n, x: n.x + dx / t.scale, y: n.y + dy / t.scale }
-              : n
-          )
-        )
+        const cdx = dx / t.scale
+        const cdy = dy / t.scale
+        setNodes((prev) => {
+          const host = prev.find(n => n.id === action.nodeId)
+          return prev.map((n) => {
+            if (n.id === action.nodeId) return { ...n, x: n.x + cdx, y: n.y + cdy }
+            // Content nodes whose centre lies inside the host frame follow it
+            if ((n.type === 'text' || n.type === 'image' || n.type === 'doodle') && host) {
+              const cx = n.x + n.width / 2
+              const cy = n.y + n.height / 2
+              if (cx >= host.x && cx <= host.x + host.width &&
+                  cy >= host.y && cy <= host.y + host.height) {
+                return { ...n, x: n.x + cdx, y: n.y + cdy }
+              }
+            }
+            return n
+          })
+        })
         lastMousePos.current = { x: e.clientX, y: e.clientY }
       } else if (action.type === 'resize') {
         const startNode = dragStartNode.current
@@ -842,6 +1171,17 @@ function App() {
           }
         }
         setSelectionRect({ x: newX, y: newY, w: newW, h: newH })
+      } else if (action.type === 'doodle') {
+        const rect = viewportRef.current?.getBoundingClientRect()
+        if (!rect) return
+        const t = viewportTransformRef.current
+        let cp = screenToCanvas(e.clientX - rect.left, e.clientY - rect.top, t.ox, t.oy, t.scale)
+        const anchor = doodleAnchorNode.current
+        if (anchor) cp = clampToAABB(cp, getNodeAABB(anchor))
+        doodleCurrentPoints.current.push([cp.x, cp.y])
+        if (doodleLivePathRef.current) {
+          doodleLivePathRef.current.setAttribute('d', pointsToSvgPath(doodleCurrentPoints.current))
+        }
       }
     }
 
@@ -858,6 +1198,21 @@ function App() {
         if (!sr || sr.w < MIN_FRAME_SIZE || sr.h < MIN_FRAME_SIZE) {
           setSelectionRect(null)
         }
+      } else if (act.type === 'doodle') {
+        const pts = doodleCurrentPoints.current
+        if (pts.length > 1) {
+          doodleAllStrokes.current.push({ points: [...pts], color: DOODLE_COLOR, width: DOODLE_WIDTH })
+          doodleUndoStack.current = []
+          setDoodleRenderedStrokes(doodleAllStrokes.current.map(s => ({
+            d: pointsToSvgPath(s.points),
+            color: s.color,
+            width: s.width,
+          })))
+        }
+        doodleCurrentPoints.current = []
+        if (doodleLivePathRef.current) {
+          doodleLivePathRef.current.setAttribute('d', '')
+        }
       }
     }
 
@@ -868,6 +1223,19 @@ function App() {
       window.removeEventListener('mouseup', handleMouseUp)
     }
   }, [updateNode])
+
+  // Escape: finish doodle mode
+  useEffect(() => {
+    if (!doodleMode) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        handleFinishDoodle()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [doodleMode, handleFinishDoodle])
 
   // Delete / Backspace: remove selected node（输入框内不拦截）
   useEffect(() => {
@@ -1010,6 +1378,7 @@ function App() {
 
   // Determine viewport cursor
   const getViewportCursor = () => {
+    if (doodleMode) return 'crosshair'
     if (framingMode) return 'crosshair'
     const action = dragAction.current
     if (action.type === 'pan') return 'grabbing'
@@ -1041,6 +1410,8 @@ function App() {
           onZoomOut={handleZoomOut}
           onFitCanvas={handleFitCanvas}
           onAddFrame={handleAddFrame}
+          doodleMode={doodleMode}
+          onStartDoodle={doodleMode ? handleFinishDoodle : handleStartDoodleMode}
         />
 
         {/* Canvas Content Layer */}
@@ -1051,19 +1422,35 @@ function App() {
           }}
         >
           {/* Render Nodes */}
-          {nodes.map((node) => (
-            <CanvasNode
-              key={node.id}
-              node={node}
-              isSelected={node.id === selectedNodeId}
-              borderWidth={borderWidth}
-              handleSize={handleSize}
-              titleScale={titleScale}
-              onMouseDown={(e) => handleNodeMouseDown(e, node.id)}
-              onResizeMouseDown={(e, corner) => handleResizeMouseDown(e, node.id, corner)}
-              onRotateMouseDown={(e) => handleRotateMouseDown(e, node.id)}
-            />
-          ))}
+          {nodes.map((node) => {
+            // 文本/图片/涂鸦节点：找到包含其中心点的父框架，用于内容裁剪
+            let clipRect: CanvasNodeProps['clipRect']
+            if (node.type === 'text' || node.type === 'image' || node.type === 'doodle') {
+              const cx = node.x + node.width  / 2
+              const cy = node.y + node.height / 2
+              const parent = nodes.find(
+                n => !n.type && n.id !== node.id &&
+                     cx >= n.x && cx <= n.x + n.width &&
+                     cy >= n.y && cy <= n.y + n.height
+              )
+              if (parent) clipRect = { x: parent.x, y: parent.y, width: parent.width, height: parent.height }
+            }
+            return (
+              <CanvasNode
+                key={node.id}
+                node={node}
+                isSelected={node.id === selectedNodeId}
+                borderWidth={borderWidth}
+                handleSize={handleSize}
+                titleScale={titleScale}
+                onMouseDown={(e) => handleNodeMouseDown(e, node.id)}
+                onResizeMouseDown={(e, corner) => handleResizeMouseDown(e, node.id, corner)}
+                onRotateMouseDown={(e) => handleRotateMouseDown(e, node.id)}
+                onTextContentChange={handleTextContentChange}
+                clipRect={clipRect}
+              />
+            )
+          })}
 
           {/* Frame Selection Overlay */}
           {framingMode && selectionRect && selectionRect.w > 2 && selectionRect.h > 2 && (
@@ -1078,6 +1465,20 @@ function App() {
             )
           )}
         </div>
+
+        {/* Doodle Drawing Overlay — viewport-space SVG, avoids locating-container clipping */}
+        {doodleMode && (
+          <svg
+            style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 20 }}
+          >
+            <g transform={`translate(${offset.x}, ${offset.y}) scale(${scale})`}>
+              {doodleRenderedStrokes.map((s, i) => (
+                <path key={i} d={s.d} stroke={s.color} strokeWidth={s.width} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+              ))}
+              <path ref={doodleLivePathRef} stroke={DOODLE_COLOR} strokeWidth={DOODLE_WIDTH} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+            </g>
+          </svg>
+        )}
       </div>
 
       {/* Frame Selection Popup (bottom-right of selection rect, screen coords) */}
@@ -1093,8 +1494,83 @@ function App() {
         />
       )}
 
-      {/* Floating Menu (only when a node is selected) */}
-      {selectedNode && (
+      {/* 涂鸦模式：浮动工具栏 */}
+      {doodleMode && (
+        <div
+          className="absolute z-50 flex -translate-x-1/2"
+          style={doodleToolbarPos
+            ? { left: doodleToolbarPos.left, top: doodleToolbarPos.top }
+            : { left: '50%', bottom: 24 }
+          }
+        >
+          <div className="flex items-center bg-white rounded-xl shadow-[0_4px_10px_rgba(0,0,0,0.15)] px-1 py-1 gap-0">
+            <button
+              className="flex items-center gap-1.5 px-3 py-2 text-sm text-[#232425] rounded-lg hover:bg-[#f5f5f5] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              disabled={doodleRenderedStrokes.length === 0}
+              onClick={handleDoodleUndo}
+              title="撤销"
+            >
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M4 10H16M4 10L8 6M4 10L8 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              <span>撤销</span>
+            </button>
+            <div className="w-px h-5 bg-[#eaeaea]" />
+            <button
+              className="flex items-center gap-1.5 px-3 py-2 text-sm text-[#232425] rounded-lg hover:bg-[#f5f5f5] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              disabled={doodleUndoStack.current.length === 0}
+              onClick={handleDoodleRedo}
+              title="重做"
+            >
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M16 10H4M16 10L12 6M16 10L12 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              <span>重做</span>
+            </button>
+            <div className="w-px h-5 bg-[#eaeaea]" />
+            <button
+              className="flex items-center gap-1.5 px-3 py-2 text-sm text-[#232425] rounded-lg hover:bg-[#f5f5f5] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              disabled={doodleRenderedStrokes.length === 0}
+              onClick={handleDoodleClear}
+              title="清除"
+            >
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M16.25 4.58203L15.7336 12.9363C15.6016 15.0707 15.5357 16.1379 15.0007 16.9053C14.7361 17.2846 14.3956 17.6048 14.0006 17.8454C13.2017 18.332 12.1325 18.332 9.99392 18.332C7.8526 18.332 6.78192 18.332 5.98254 17.8444C5.58733 17.6034 5.24667 17.2827 4.98223 16.9027C4.4474 16.1342 4.38287 15.0654 4.25384 12.928L3.75 4.58203" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                <path d="M2.5 4.58464H17.5M13.3797 4.58464L12.8109 3.41108C12.433 2.63152 12.244 2.24174 11.9181 1.99864C11.8458 1.94472 11.7693 1.89675 11.6892 1.85522C11.3283 1.66797 10.8951 1.66797 10.0287 1.66797C9.14067 1.66797 8.69667 1.66797 8.32973 1.86307C8.24842 1.90631 8.17082 1.95622 8.09774 2.01228C7.76803 2.26522 7.58386 2.66926 7.21551 3.47735L6.71077 4.58464" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                <path d="M7.91663 13.75V8.75" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                <path d="M12.0834 13.75V8.75" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+              <span>清除</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 文本节点：右侧专属工具栏 */}
+      {selectedNode?.type === 'text' && (
+        <TextNodeToolbar
+          left={textToolbarPos.left}
+          top={textToolbarPos.top}
+          nodeId={selectedNode.id}
+          fontSize={selectedNode.fontSize ?? 80}
+          textColor={selectedNode.textColor ?? '#000000'}
+          fontFamily={selectedNode.fontFamily ?? 'Arial, sans-serif'}
+          fontWeight={selectedNode.fontWeight ?? 'normal'}
+          fontStyle={selectedNode.fontStyle ?? 'normal'}
+          textAlign={selectedNode.textAlign ?? 'left'}
+          onFontSizeChange={handleFontSizeChange}
+          onColorChange={handleTextColorChange}
+          onFontFamilyChange={handleFontFamilyChange}
+          onFontWeightChange={handleFontWeightChange}
+          onFontStyleChange={handleFontStyleChange}
+          onTextAlignChange={handleTextAlignChange}
+          onClose={() => setSelectedNodeId(null)}
+          onDelete={handleDeleteSelected}
+        />
+      )}
+
+      {/* Floating Menu (only when a non-text node is selected) */}
+      {selectedNode && !selectedNode.type && (
         <FloatingMenu
           left={floatingMenuPos.left}
           top={floatingMenuPos.top}
@@ -1106,6 +1582,9 @@ function App() {
           onExportFormat={handleExportFormat}
           framingMode={framingMode}
           onFramingModeChange={handleFramingModeChange}
+          onAddTextElement={handleAddTextElement}
+          onAddImageElement={handleAddImageElement}
+          onAddDoodleElement={handleStartDoodleMode}
         />
       )}
     </div>
@@ -1123,6 +1602,8 @@ interface TopToolbarProps {
   onZoomOut: () => void
   onFitCanvas: () => void
   onAddFrame: () => void
+  doodleMode: boolean
+  onStartDoodle: () => void
 }
 
 function TopToolbar({
@@ -1132,6 +1613,8 @@ function TopToolbar({
   onZoomOut,
   onFitCanvas,
   onAddFrame,
+  doodleMode,
+  onStartDoodle,
 }: TopToolbarProps) {
   const btnBase =
     'cursor-pointer border flex justify-center items-center w-10 h-10 transition-all duration-150 ease-[cubic-bezier(0.4,0,0.2,1)] hover:-translate-y-px active:translate-y-0 active:shadow-[0_1px_4px_rgba(0,0,0,0.05)]'
@@ -1179,6 +1662,14 @@ function TopToolbar({
         <AddFrameIcon />
       </button>
       <button
+        type="button"
+        className={`${btnBase} ${doodleMode ? btnActive : btnInactive} max-[1220px]:hidden`}
+        title={doodleMode ? '退出涂鸦 (Esc)' : '涂鸦'}
+        onClick={onStartDoodle}
+      >
+        <DoodleIcon />
+      </button>
+      <button
         className={`${btnBase} ${btnInactive} max-[1220px]:hidden`}
         title="全画布"
         onClick={onFitCanvas}
@@ -1208,13 +1699,72 @@ interface CanvasNodeProps {
   onMouseDown: (e: React.MouseEvent) => void
   onResizeMouseDown: (e: React.MouseEvent, corner: ResizeCorner) => void
   onRotateMouseDown: (e: React.MouseEvent) => void
+  onTextContentChange?: (id: string, text: string) => void
+  /** 父框架的画布坐标矩形；存在时将文本内容裁剪到该范围 */
+  clipRect?: { x: number; y: number; width: number; height: number }
+}
+
+const TEXT_STYLE_FIXED: React.CSSProperties = {
+  lineHeight: 1,
+  letterSpacing: 0,
+  wordBreak: 'break-word',
+  whiteSpace: 'pre-wrap',
+  margin: 0,
+  padding: 0,
+  border: 'none',
+  background: 'transparent',
+  outline: 'none',
 }
 
 function CanvasNode({
   node, isSelected, borderWidth, handleSize, titleScale,
-  onMouseDown, onResizeMouseDown, onRotateMouseDown,
+  onMouseDown, onResizeMouseDown, onRotateMouseDown, onTextContentChange,
+  clipRect,
 }: CanvasNodeProps) {
   const selectionColor = 'rgb(15, 127, 255)'
+
+  // 将文本/图片/涂鸦内容裁剪到父框架范围（画布坐标，inset 值单位与 CanvasNode 内部 px 一致）
+  const clipPath = (() => {
+    if (!clipRect || (node.type !== 'text' && node.type !== 'image' && node.type !== 'doodle')) return undefined
+    const t = Math.max(0, clipRect.y - node.y)
+    const r = Math.max(0, (node.x + node.width)  - (clipRect.x + clipRect.width))
+    const b = Math.max(0, (node.y + node.height) - (clipRect.y + clipRect.height))
+    const l = Math.max(0, clipRect.x - node.x)
+    if (t === 0 && r === 0 && b === 0 && l === 0) return undefined
+    return `inset(${t}px ${r}px ${b}px ${l}px)`
+  })()
+  const [textEditing, setTextEditing] = useState(false)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  const beginEdit = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setTextEditing(true)
+    setTimeout(() => {
+      const el = textareaRef.current
+      if (!el) return
+      el.focus()
+      el.selectionStart = el.selectionEnd = el.value.length
+    }, 0)
+  }
+
+  const endEdit = () => setTextEditing(false)
+
+  const isText = node.type === 'text'
+  const isDoodle = node.type === 'doodle'
+  const fontSize    = node.fontSize   ?? 80
+  const textColor   = node.textColor  ?? '#000000'
+  const fontFamily  = node.fontFamily ?? 'Arial, sans-serif'
+  const fontWeight  = node.fontWeight ?? 'normal'
+  const fontStyle   = node.fontStyle  ?? 'normal'
+  const textAlign   = node.textAlign  ?? 'left'
+  const TEXT_STYLE: React.CSSProperties = {
+    ...TEXT_STYLE_FIXED,
+    color: textColor,
+    fontFamily,
+    fontWeight,
+    fontStyle,
+    textAlign,
+  }
 
   return (
     <div
@@ -1235,32 +1785,75 @@ function CanvasNode({
           height: node.height,
           boxShadow: isSelected ? `${selectionColor} 0px 0px 0px ${borderWidth}px` : 'none',
           transition: 'box-shadow 0.2s',
+          clipPath,
         }}
       >
-        {/* Page Title */}
-        <div
-          className="pointer-events-auto overflow-hidden text-ellipsis select-none whitespace-nowrap absolute"
-          style={{
-            transform: `scale(${titleScale})`,
-            transformOrigin: 'left bottom',
-            bottom: `calc(100% - ${titleScale}px)`,
-            left: 0,
-            maxWidth: 307.2,
-          }}
-        >
-          <span className="text-[#999] font-sans text-[13px] leading-none">{node.title}</span>
-        </div>
+        {/* Page Title — 文本/涂鸦节点不显示标题 */}
+        {!isText && !isDoodle && (
+          <div
+            className="pointer-events-auto overflow-hidden text-ellipsis select-none whitespace-nowrap absolute"
+            style={{
+              transform: `scale(${titleScale})`,
+              transformOrigin: 'left bottom',
+              bottom: `calc(100% - ${titleScale}px)`,
+              left: 0,
+              maxWidth: 307.2,
+            }}
+          >
+            <span className="text-[#999] font-sans text-[13px] leading-none">{node.title}</span>
+          </div>
+        )}
 
-        {/* Image */}
-        <div className="overflow-hidden flex justify-center items-center w-full h-full relative">
-          <div className="flex justify-center items-center w-full h-full relative">
-            {node.imageSrc ? (
-              <img src={node.imageSrc} alt={node.title} className="object-contain select-none w-full h-full" draggable={false} />
+        {/* Content */}
+        {isText ? (
+          /* 文本节点：透明背景，参考 textElemnt.html 结构 */
+          <div style={{ cursor: 'default', position: 'relative', width: '100%', height: '100%' }}
+            onDoubleClick={beginEdit}
+          >
+            {textEditing ? (
+              <textarea
+                ref={textareaRef}
+                style={{ ...TEXT_STYLE, fontSize, resize: 'none', width: '100%', height: '100%', overflow: 'hidden' }}
+                value={node.textContent ?? ''}
+                onChange={e => onTextContentChange?.(node.id, e.target.value)}
+                onBlur={endEdit}
+                onKeyDown={e => e.key === 'Escape' && endEdit()}
+                onMouseDown={e => e.stopPropagation()}
+              />
             ) : (
-              <div className="w-full h-full bg-[#ececec]" aria-hidden />
+              <div
+                className="text-display"
+                style={{ ...TEXT_STYLE, fontSize, userSelect: 'none', width: '100%', height: '100%' }}
+              >
+                {node.textContent ?? '文本'}
+              </div>
             )}
           </div>
-        </div>
+        ) : isDoodle ? (
+          /* 涂鸦节点 */
+          <svg
+            width={node.width}
+            height={node.height}
+            viewBox={node.doodleViewBox ? `0 0 ${node.doodleViewBox[0]} ${node.doodleViewBox[1]}` : `0 0 ${node.width} ${node.height}`}
+            className="select-none"
+            style={{ position: 'absolute', top: 0, left: 0 }}
+          >
+            {node.doodleStrokes?.map((s, i) => (
+              <path key={i} d={s.d} stroke={s.color} strokeWidth={s.width} fill="none" strokeLinecap="round" strokeLinejoin="round" />
+            ))}
+          </svg>
+        ) : (
+          /* 图片/空白画框 */
+          <div className="overflow-hidden flex justify-center items-center w-full h-full relative">
+            <div className="flex justify-center items-center w-full h-full relative">
+              {node.imageSrc ? (
+                <img src={node.imageSrc} alt={node.title} className="object-contain select-none w-full h-full" draggable={false} />
+              ) : (
+                <div className="w-full h-full bg-[#ececec]" aria-hidden />
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Selection Handles (only when selected) */}
         {isSelected && (
@@ -1556,6 +2149,260 @@ function FrameSelectionOverlay({ rect, onBodyMouseDown, onHandleMouseDown }: Fra
 }
 
 /* ============================
+   Text Node Toolbar Component
+   ============================ */
+
+const FONT_FAMILIES = [
+  'Arial, sans-serif',
+  'Helvetica, sans-serif',
+  'Georgia, serif',
+  'Times New Roman, serif',
+  'Courier New, monospace',
+  'Verdana, sans-serif',
+  'Trebuchet MS, sans-serif',
+]
+
+interface TextNodeToolbarProps {
+  left: number
+  top: number
+  nodeId: string
+  fontSize: number
+  textColor: string
+  fontFamily: string
+  fontWeight: 'normal' | 'bold'
+  fontStyle: 'normal' | 'italic'
+  textAlign: 'left' | 'center' | 'right'
+  onFontSizeChange: (id: string, size: number) => void
+  onColorChange: (id: string, color: string) => void
+  onFontFamilyChange: (id: string, family: string) => void
+  onFontWeightChange: (id: string, weight: 'normal' | 'bold') => void
+  onFontStyleChange: (id: string, style: 'normal' | 'italic') => void
+  onTextAlignChange: (id: string, align: 'left' | 'center' | 'right') => void
+  onClose: () => void
+  onDelete: () => void
+}
+
+function TextNodeToolbar({
+  left, top, nodeId,
+  fontSize, textColor, fontFamily, fontWeight, fontStyle, textAlign,
+  onFontSizeChange, onColorChange, onFontFamilyChange,
+  onFontWeightChange, onFontStyleChange, onTextAlignChange,
+  onClose, onDelete,
+}: TextNodeToolbarProps) {
+  const [sizeInput, setSizeInput] = useState(String(fontSize))
+  const [colorInput, setColorInput] = useState(textColor)
+
+  useEffect(() => { setSizeInput(String(fontSize)) }, [fontSize])
+  useEffect(() => { setColorInput(textColor) }, [textColor])
+
+  const commitSize = (val: string) => {
+    const n = parseInt(val, 10)
+    if (!isNaN(n) && n >= 8 && n <= 800) onFontSizeChange(nodeId, n)
+    else setSizeInput(String(fontSize))
+  }
+
+  const commitColor = (val: string) => {
+    if (/^#[0-9a-fA-F]{6}$/.test(val)) onColorChange(nodeId, val)
+    else setColorInput(textColor)
+  }
+
+  const label = 'block text-xs text-[#909599] font-[Arial,sans-serif] mb-1.5 select-none'
+  const divider = <div className="h-px bg-[#eaeaea] my-0" />
+
+  const styleBtn = (active: boolean) =>
+    `flex items-center justify-center w-8 h-8 rounded-lg border-0 cursor-pointer transition-colors select-none ${
+      active
+        ? 'bg-[#232425] text-white'
+        : 'bg-transparent text-[#232425] hover:bg-[#f0f0f0]'
+    }`
+
+  const alignBtn = (active: boolean) =>
+    `flex items-center justify-center w-8 h-8 rounded-lg border-0 cursor-pointer transition-colors select-none ${
+      active
+        ? 'bg-[#232425] text-white'
+        : 'bg-transparent text-[#232425] hover:bg-[#f0f0f0]'
+    }`
+
+  return (
+    <div
+      className="absolute z-[100] bg-white border border-[#eaeaea] rounded-xl shadow-[0_4px_16px_rgba(0,0,0,0.12)] overflow-hidden"
+      style={{ left, top, width: 192 }}
+      onMouseDown={e => e.stopPropagation()}
+    >
+      {/* Header */}
+      <div className="flex items-center justify-between px-3 py-2.5 border-b border-[#eaeaea]">
+        <span className="text-sm font-medium text-[#232425] font-[Arial,sans-serif] select-none">文本样式</span>
+        <button
+          className="flex items-center justify-center w-6 h-6 rounded-md border-0 bg-transparent cursor-pointer text-[#909599] hover:bg-[#f0f0f0] hover:text-[#232425] transition-colors"
+          onClick={onClose}
+          title="关闭"
+        >
+          <CloseIcon />
+        </button>
+      </div>
+
+      <div className="flex flex-col gap-0 p-3 pb-0">
+
+        {/* 字体 */}
+        <div className="mb-3">
+          <label className={label}>字体</label>
+          <div className="relative">
+            <select
+              className="w-full h-8 pl-2.5 pr-7 text-sm font-[Arial,sans-serif] text-[#232425] bg-[#f5f5f5] border border-[#eaeaea] rounded-lg outline-none cursor-pointer appearance-none hover:border-[#c8c8c8] focus:border-[rgb(15,127,255)] transition-colors"
+              value={fontFamily}
+              onChange={e => onFontFamilyChange(nodeId, e.target.value)}
+              onMouseDown={e => e.stopPropagation()}
+              style={{ fontFamily }}
+            >
+              {FONT_FAMILIES.map(f => (
+                <option key={f} value={f} style={{ fontFamily: f }}>{f.split(',')[0]}</option>
+              ))}
+            </select>
+            <div className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[#909599]">
+              <svg viewBox="64 64 896 896" width="12" height="12" fill="currentColor">
+                <path d="M884 256h-75c-5.1 0-9.9 2.5-12.9 6.6L512 654.2 227.9 262.6c-3-4.1-7.8-6.6-12.9-6.6h-75c-6.5 0-10.3 7.4-6.5 12.7l352.6 486.1c12.8 17.6 39 17.6 51.7 0l352.6-486.1c3.9-5.3.1-12.7-6.4-12.7z" />
+              </svg>
+            </div>
+          </div>
+        </div>
+
+        {divider}
+
+        {/* 字号 */}
+        <div className="my-3">
+          <label className={label}>字号</label>
+          <div className="flex items-center gap-1.5">
+            <input
+              className="flex-1 h-8 px-2.5 text-sm font-[Arial,sans-serif] text-[#232425] bg-[#f5f5f5] border border-[#eaeaea] rounded-lg outline-none focus:border-[rgb(15,127,255)] transition-colors [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none"
+              type="number"
+              min={8}
+              max={800}
+              value={sizeInput}
+              onChange={e => setSizeInput(e.target.value)}
+              onBlur={e => commitSize(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') { commitSize((e.target as HTMLInputElement).value); (e.target as HTMLInputElement).blur() }
+              }}
+              onMouseDown={e => e.stopPropagation()}
+            />
+            <span className="text-sm text-[#909599] font-[Arial,sans-serif] select-none flex-shrink-0">px</span>
+          </div>
+        </div>
+
+        {divider}
+
+        {/* 文本颜色 */}
+        <div className="my-3">
+          <label className={label}>文本颜色</label>
+          <div className="flex items-center gap-1.5">
+            <label className="relative flex-shrink-0 cursor-pointer">
+              <div
+                className="w-8 h-8 rounded-lg border border-[#ddd] shadow-[inset_0_0_0_1px_rgba(0,0,0,0.06)]"
+                style={{ backgroundColor: textColor }}
+              />
+              <input
+                type="color"
+                value={textColor}
+                onChange={e => { onColorChange(nodeId, e.target.value); setColorInput(e.target.value) }}
+                className="sr-only"
+              />
+            </label>
+            <input
+              className="flex-1 h-8 px-2.5 text-sm font-[Arial,sans-serif] text-[#232425] bg-[#f5f5f5] border border-[#eaeaea] rounded-lg outline-none focus:border-[rgb(15,127,255)] transition-colors uppercase tracking-wide"
+              type="text"
+              maxLength={7}
+              placeholder="#000000"
+              value={colorInput}
+              onChange={e => setColorInput(e.target.value)}
+              onBlur={e => commitColor(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') { commitColor((e.target as HTMLInputElement).value); (e.target as HTMLInputElement).blur() }
+              }}
+              onMouseDown={e => e.stopPropagation()}
+            />
+          </div>
+        </div>
+
+        {divider}
+
+        {/* 字体样式 */}
+        <div className="my-3">
+          <label className={label}>字体样式</label>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              className={styleBtn(fontWeight === 'bold')}
+              onClick={() => onFontWeightChange(nodeId, fontWeight === 'bold' ? 'normal' : 'bold')}
+              title="粗体"
+            >
+              <svg viewBox="64 64 896 896" width="15" height="15" fill="currentColor">
+                <path d="M697.8 481.4c33.6-35 54.2-82.3 54.2-134.3v-10.2C752 229.3 663.9 142 555.3 142H259.4c-15.1 0-27.4 12.3-27.4 27.4v679.1c0 16.3 13.2 29.5 29.5 29.5h318.7c117 0 211.8-94.2 211.8-210.5v-11c0-73-37.4-137.3-94.2-175.1zM328 238h224.7c57.1 0 103.3 44.4 103.3 99.3v9.5c0 54.8-46.3 99.3-103.3 99.3H328V238zm366.6 429.4c0 62.9-51.7 113.9-115.5 113.9H328V542.7h251.1c63.8 0 115.5 51 115.5 113.9v10.8z" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className={styleBtn(fontStyle === 'italic')}
+              onClick={() => onFontStyleChange(nodeId, fontStyle === 'italic' ? 'normal' : 'italic')}
+              title="斜体"
+            >
+              <svg viewBox="64 64 896 896" width="15" height="15" fill="currentColor">
+                <path d="M798 160H366c-4.4 0-8 3.6-8 8v64c0 4.4 3.6 8 8 8h181.2l-156 544H229c-4.4 0-8 3.6-8 8v64c0 4.4 3.6 8 8 8h432c4.4 0 8-3.6 8-8v-64c0-4.4-3.6-8-8-8H474.4l156-544H798c4.4 0 8-3.6 8-8v-64c0-4.4-3.6-8-8-8z" />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        {divider}
+
+        {/* 文本对齐 */}
+        <div className="my-3">
+          <label className={label}>文本对齐</label>
+          <div className="flex items-center gap-1">
+            {(['left', 'center', 'right'] as const).map((align, i) => (
+              <button
+                key={align}
+                type="button"
+                className={alignBtn(textAlign === align)}
+                onClick={() => onTextAlignChange(nodeId, align)}
+                title={['左对齐', '居中', '右对齐'][i]}
+              >
+                {align === 'left' && (
+                  <svg viewBox="64 64 896 896" width="15" height="15" fill="currentColor">
+                    <path d="M120 230h496c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm0 424h496c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm784 140H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0-424H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8z" />
+                  </svg>
+                )}
+                {align === 'center' && (
+                  <svg viewBox="64 64 896 896" width="15" height="15" fill="currentColor">
+                    <path d="M264 230h496c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H264c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8zm496 424c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8H264c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h496zm144 140H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0-424H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8z" />
+                  </svg>
+                )}
+                {align === 'right' && (
+                  <svg viewBox="64 64 896 896" width="15" height="15" fill="currentColor">
+                    <path d="M904 158H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h496c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 424H408c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h496c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0 212H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8zm0-424H120c-4.4 0-8 3.6-8 8v56c0 4.4 3.6 8 8 8h784c4.4 0 8-3.6 8-8v-56c0-4.4-3.6-8-8-8z" />
+                  </svg>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+
+      </div>
+
+      {/* 删除 */}
+      <div className="border-t border-[#eaeaea]">
+        <button
+          className="flex items-center gap-2 px-3 py-2.5 text-[#e53e3e] text-sm font-[Arial,sans-serif] border-0 bg-transparent cursor-pointer hover:bg-[#fff5f5] transition-colors w-full text-left"
+          onClick={onDelete}
+        >
+          <DeleteIcon />
+          删除文本
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/* ============================
    Floating Menu Component
    ============================ */
 
@@ -1570,6 +2417,9 @@ interface FloatingMenuProps {
   onExportFormat: (format: ExportFormat) => void | Promise<void>
   framingMode: boolean
   onFramingModeChange: (v: boolean) => void
+  onAddTextElement: () => void
+  onAddImageElement: () => void
+  onAddDoodleElement: () => void
 }
 
 function FloatingMenu({
@@ -1583,6 +2433,9 @@ function FloatingMenu({
   onExportFormat,
   framingMode,
   onFramingModeChange,
+  onAddTextElement,
+  onAddImageElement,
+  onAddDoodleElement,
 }: FloatingMenuProps) {
   const [activePanel, setActivePanel] = useState<null | 'toolbox' | 'addElement' | 'export'>(null)
   const [editTextMode, setEditTextMode] = useState(false)
@@ -1684,7 +2537,7 @@ function FloatingMenu({
                       <DropdownArrowIcon />
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="start" sideOffset={6}>
-                      <DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => { onAddTextElement(); setActivePanel(null) }}>
                         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
                           <mask id="add-el-text-mask" style={{ maskType: 'alpha' }} maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16">
                             <rect width="16" height="16" fill="#D9D9D9" />
@@ -1697,7 +2550,7 @@ function FloatingMenu({
                         </svg>
                         添加文本
                       </DropdownMenuItem>
-                      <DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => { onAddImageElement(); setActivePanel(null) }}>
                         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
                           <mask id="add-el-img-mask" style={{ maskType: 'alpha' }} maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16">
                             <rect width="16" height="16" fill="#D9D9D9" />
@@ -1710,7 +2563,7 @@ function FloatingMenu({
                         </svg>
                         添加图片
                       </DropdownMenuItem>
-                      <DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => { onAddDoodleElement(); setActivePanel(null) }}>
                         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
                           <mask id="add-el-draw-mask" style={{ maskType: 'alpha' }} maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16">
                             <rect width="16" height="16" fill="#D9D9D9" />
@@ -1870,7 +2723,7 @@ function FloatingMenu({
                     <circle cx="1.99" cy="2.5" r="0.5" fill="currentColor" stroke="currentColor" strokeWidth="0.333" />
                     <circle cx="13.99" cy="12.334" r="0.5" fill="currentColor" stroke="currentColor" strokeWidth="0.333" />
                     <circle cx="4.656" cy="2.5" r="0.5" fill="currentColor" stroke="currentColor" strokeWidth="0.333" />
-                    <circle cx="13.99" cy="9.666" r="0.5" fill="currentColor" stroke="currentColor" strokeWidth="0.333" />
+                    <circle cx="13.99" cy="9.666" r="0.5" fill="caurrentColor" stroke="currentColor" strokeWidth="0.333" />
                     <circle cx="7.324" cy="2.5" r="0.5" fill="currentColor" stroke="currentColor" strokeWidth="0.333" />
                   </svg>
                 ),
