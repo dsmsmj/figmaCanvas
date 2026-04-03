@@ -65,14 +65,6 @@ const AddFrameIcon = () => (
   </svg>
 )
 
-const DoodleIcon = () => (
-  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M8.35429 13.245L12.8276 5.49679C13.3455 4.59999 13.0382 3.45325 12.1414 2.93549C11.2446 2.41773 10.0978 2.72499 9.58008 3.62179L5.10669 11.3699C4.95141 11.6389 4.84761 11.9344 4.80059 12.2413L4.44509 14.562C4.38801 14.9345 4.56535 15.3039 4.89171 15.4923C5.21808 15.6807 5.62661 15.6496 5.92068 15.4139L7.75265 13.9458C7.99499 13.7515 8.19901 13.5139 8.35429 13.245Z" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
-    <path d="M5 11.25L8.125 13.125" stroke="currentColor" strokeWidth="1.25" />
-    <path d="M5 15.6544C11.6173 18.4456 11.6173 10.215 17.5 15.6544" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
-  </svg>
-)
-
 const FitCanvasIcon = () => (
   <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
     <mask id="mask0_fit_canvas" style={{ maskType: 'alpha' }} maskUnits="userSpaceOnUse" x="0" y="0" width="20" height="20">
@@ -181,8 +173,8 @@ class Vec2 {
 
 const MIN_NODE_SIZE = 50
 /** 新建无图画框的默认宽高（画布坐标） */
-const DEFAULT_NEW_FRAME_W = 1920
-const DEFAULT_NEW_FRAME_H = 1080
+const DEFAULT_NEW_FRAME_W = 1080
+const DEFAULT_NEW_FRAME_H = 1920
 
 /** CSS-style 2D rotation of a vector (degrees, +y down). */
 function rotateVec(v: Vec2, deg: number): Vec2 {
@@ -428,6 +420,8 @@ function App() {
   const handleToolModeChange = useCallback((mode: ToolMode) => {
     setToolMode(mode)
     if (mode === 'hand') setSelectedNodeId(null)
+    setFramingMode(false)
+    setSelectionRect(null)
   }, [])
 
   // --- Refs ---
@@ -473,6 +467,8 @@ function App() {
   const DOODLE_WIDTH = 8
 
   const handleAddFrame = useCallback(() => {
+    setFramingMode(false)
+    setSelectionRect(null)
     const w = DEFAULT_NEW_FRAME_W
     const h = DEFAULT_NEW_FRAME_H
     const rect = viewportRef.current?.getBoundingClientRect()
@@ -595,8 +591,9 @@ function App() {
   }, [])
 
   const handleStartDoodleMode = useCallback(() => {
+    setFramingMode(false)
+    setSelectionRect(null)
     doodleAnchorNode.current = selectedNodeRef.current
-    setSelectedNodeId(null)
     setDoodleMode(true)
     doodleAllStrokes.current = []
     doodleUndoStack.current = []
@@ -708,14 +705,30 @@ function App() {
   const handleDeleteSelected = useCallback(() => {
     if (!selectedNodeId) return
     const id = selectedNodeId
-    setNodes((prev) => prev.filter((n) => n.id !== id))
+    setNodes((prev) => {
+      const host = prev.find((n) => n.id === id)
+      if (!host) return prev
+      return prev.filter((n) => {
+        if (n.id === id) return false // delete target node
+        // If the target node is a frame (no type), delete any content inside it
+        if (!host.type && (n.type === 'text' || n.type === 'image' || n.type === 'doodle')) {
+          const cx = n.x + n.width / 2
+          const cy = n.y + n.height / 2
+          if (
+            cx >= host.x &&
+            cx <= host.x + host.width &&
+            cy >= host.y &&
+            cy <= host.y + host.height
+          ) {
+            return false // delete inner node
+          }
+        }
+        return true
+      })
+    })
     setSelectedNodeId(null)
     const a = dragAction.current
-    if (
-      a.type === 'move' ||
-      a.type === 'resize' ||
-      a.type === 'rotate'
-    ) {
+    if (a.type === 'move' || a.type === 'resize' || a.type === 'rotate') {
       if (a.nodeId === id) {
         dragAction.current = { type: 'none' }
         dragStartNode.current = null
@@ -804,25 +817,32 @@ function App() {
     setNodes((prev) => prev.map((n) => (n.id === id ? { ...n, ...patch } : n)))
   }, [])
 
-  // --- Wheel zoom ---
+  // --- Wheel zoom & pan ---
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
-      if (!e.ctrlKey) return
       e.preventDefault()
-      const rect = viewportRef.current?.getBoundingClientRect()
-      if (!rect) return
+      
+      if (e.ctrlKey) {
+        const rect = viewportRef.current?.getBoundingClientRect()
+        if (!rect) return
 
-      const mouseX = e.clientX - rect.left
-      const mouseY = e.clientY - rect.top
+        const mouseX = e.clientX - rect.left
+        const mouseY = e.clientY - rect.top
 
-      const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9
-      const newScale = Math.min(Math.max(scale * zoomFactor, 0.05), 5)
+        const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9
+        const newScale = Math.min(Math.max(scale * zoomFactor, 0.05), 5)
 
-      const newOffsetX = mouseX - ((mouseX - offset.x) / scale) * newScale
-      const newOffsetY = mouseY - ((mouseY - offset.y) / scale) * newScale
+        const newOffsetX = mouseX - ((mouseX - offset.x) / scale) * newScale
+        const newOffsetY = mouseY - ((mouseY - offset.y) / scale) * newScale
 
-      setScale(newScale)
-      setOffset({ x: newOffsetX, y: newOffsetY })
+        setScale(newScale)
+        setOffset({ x: newOffsetX, y: newOffsetY })
+      } else {
+        setOffset(prev => ({
+          x: prev.x - e.deltaX,
+          y: prev.y - e.deltaY,
+        }))
+      }
     },
     [scale, offset]
   )
@@ -839,19 +859,27 @@ function App() {
       }
 
       if (doodleModeRef.current && e.button === 0) {
-        const rect = viewportRef.current?.getBoundingClientRect()
-        if (!rect) return
-        const t = viewportTransformRef.current
-        let cp = screenToCanvas(e.clientX - rect.left, e.clientY - rect.top, t.ox, t.oy, t.scale)
-        const anchor = doodleAnchorNode.current
-        if (anchor) cp = clampToAABB(cp, getNodeAABB(anchor))
-        doodleCurrentPoints.current = [[cp.x, cp.y]]
-        dragAction.current = { type: 'doodle' }
-        if (doodleLivePathRef.current) {
-          doodleLivePathRef.current.setAttribute('d', `M${cp.x} ${cp.y}`)
+        const target = e.target as HTMLElement
+        const isBlank = target.classList.contains('viewport') || target.classList.contains('locating-container')
+        if (isBlank) {
+          handleFinishDoodle()
+          e.preventDefault()
+          return
+        } else {
+          const rect = viewportRef.current?.getBoundingClientRect()
+          if (!rect) return
+          const t = viewportTransformRef.current
+          let cp = screenToCanvas(e.clientX - rect.left, e.clientY - rect.top, t.ox, t.oy, t.scale)
+          const anchor = doodleAnchorNode.current
+          if (anchor) cp = clampToAABB(cp, getNodeAABB(anchor))
+          doodleCurrentPoints.current = [[cp.x, cp.y]]
+          dragAction.current = { type: 'doodle' }
+          if (doodleLivePathRef.current) {
+            doodleLivePathRef.current.setAttribute('d', `M${cp.x} ${cp.y}`)
+          }
+          e.preventDefault()
+          return
         }
-        e.preventDefault()
-        return
       }
 
       if (framingModeRef.current && e.button === 0) {
@@ -889,20 +917,24 @@ function App() {
   const handleNodeMouseDown = useCallback(
     (e: React.MouseEvent, nodeId: string) => {
       if (doodleModeRef.current && e.button === 0) {
-        e.stopPropagation()
-        e.preventDefault()
-        const rect = viewportRef.current?.getBoundingClientRect()
-        if (!rect) return
-        const t = viewportTransformRef.current
-        let cp = screenToCanvas(e.clientX - rect.left, e.clientY - rect.top, t.ox, t.oy, t.scale)
         const anchor = doodleAnchorNode.current
-        if (anchor) cp = clampToAABB(cp, getNodeAABB(anchor))
-        doodleCurrentPoints.current = [[cp.x, cp.y]]
-        dragAction.current = { type: 'doodle' }
-        if (doodleLivePathRef.current) {
-          doodleLivePathRef.current.setAttribute('d', `M${cp.x} ${cp.y}`)
+        if (anchor && anchor.id !== nodeId) {
+          handleFinishDoodle()
+        } else {
+          e.stopPropagation()
+          e.preventDefault()
+          const rect = viewportRef.current?.getBoundingClientRect()
+          if (!rect) return
+          const t = viewportTransformRef.current
+          let cp = screenToCanvas(e.clientX - rect.left, e.clientY - rect.top, t.ox, t.oy, t.scale)
+          if (anchor) cp = clampToAABB(cp, getNodeAABB(anchor))
+          doodleCurrentPoints.current = [[cp.x, cp.y]]
+          dragAction.current = { type: 'doodle' }
+          if (doodleLivePathRef.current) {
+            doodleLivePathRef.current.setAttribute('d', `M${cp.x} ${cp.y}`)
+          }
+          return
         }
-        return
       }
       if (toolMode !== 'select') return
       e.stopPropagation()
@@ -1252,12 +1284,11 @@ function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [toolMode, selectedNodeId, handleDeleteSelected])
 
-  // Only prevent browser zoom when Ctrl+wheel is used on viewport
+  // Prevent browser default behavior for wheel to support smooth pan & zoom
   useEffect(() => {
     const el = viewportRef.current
     if (!el) return
     const prevent = (e: WheelEvent) => {
-      if (!e.ctrlKey) return
       e.preventDefault()
     }
     el.addEventListener('wheel', prevent, { passive: false })
@@ -1410,8 +1441,6 @@ function App() {
           onZoomOut={handleZoomOut}
           onFitCanvas={handleFitCanvas}
           onAddFrame={handleAddFrame}
-          doodleMode={doodleMode}
-          onStartDoodle={doodleMode ? handleFinishDoodle : handleStartDoodleMode}
         />
 
         {/* Canvas Content Layer */}
@@ -1547,7 +1576,7 @@ function App() {
       )}
 
       {/* 文本节点：右侧专属工具栏 */}
-      {selectedNode?.type === 'text' && (
+      {selectedNode?.type === 'text' && !doodleMode && (
         <TextNodeToolbar
           left={textToolbarPos.left}
           top={textToolbarPos.top}
@@ -1570,7 +1599,7 @@ function App() {
       )}
 
       {/* Floating Menu (only when a non-text node is selected) */}
-      {selectedNode && !selectedNode.type && (
+      {selectedNode && !selectedNode.type && !doodleMode && (
         <FloatingMenu
           left={floatingMenuPos.left}
           top={floatingMenuPos.top}
@@ -1602,8 +1631,6 @@ interface TopToolbarProps {
   onZoomOut: () => void
   onFitCanvas: () => void
   onAddFrame: () => void
-  doodleMode: boolean
-  onStartDoodle: () => void
 }
 
 function TopToolbar({
@@ -1613,8 +1640,6 @@ function TopToolbar({
   onZoomOut,
   onFitCanvas,
   onAddFrame,
-  doodleMode,
-  onStartDoodle,
 }: TopToolbarProps) {
   const btnBase =
     'cursor-pointer border flex justify-center items-center w-10 h-10 transition-all duration-150 ease-[cubic-bezier(0.4,0,0.2,1)] hover:-translate-y-px active:translate-y-0 active:shadow-[0_1px_4px_rgba(0,0,0,0.05)]'
@@ -1660,14 +1685,6 @@ function TopToolbar({
         onClick={onAddFrame}
       >
         <AddFrameIcon />
-      </button>
-      <button
-        type="button"
-        className={`${btnBase} ${doodleMode ? btnActive : btnInactive} max-[1220px]:hidden`}
-        title={doodleMode ? '退出涂鸦 (Esc)' : '涂鸦'}
-        onClick={onStartDoodle}
-      >
-        <DoodleIcon />
       </button>
       <button
         className={`${btnBase} ${btnInactive} max-[1220px]:hidden`}
