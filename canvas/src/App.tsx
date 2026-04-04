@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import React, { useState, useRef, useCallback, useEffect, forwardRef, useImperativeHandle } from 'react'
 import canvasImg from './assets/imges.png'
 import { detectTextRegions, mergeAdjacentRegions, type TextRegion } from './ocrTextDetect'
 import {
@@ -286,7 +286,31 @@ function resizePatchFromTargetCorner(
    Main App Component
    ============================ */
 
-function App() {
+export interface FigmaCanvasProps {
+  initialNodes?: SceneNode[]
+  onNodesChange?: (nodes: SceneNode[]) => void
+  onSelectionChange?: (selectedId: string | null) => void
+}
+
+export interface FigmaCanvasRef {
+  getNodes: () => SceneNode[]
+  setNodes: React.Dispatch<React.SetStateAction<SceneNode[]>>
+  addNode: (node: Omit<SceneNode, 'id'>) => string
+  updateNode: (id: string, patch: Partial<SceneNode>) => void
+  deleteNode: (id: string) => void
+  getSelectedNodeId: () => string | null
+  setSelectedNodeId: React.Dispatch<React.SetStateAction<string | null>>
+  getToolMode: () => ToolMode
+  setToolMode: (mode: ToolMode) => void
+  setFramingMode: (v: boolean) => void
+  setDoodleMode: (v: boolean) => void
+  setEditTextMode: (v: boolean) => void
+  exportAsPng: (nodeId: string) => Promise<void>
+  exportAsSvg: (nodeId: string) => void
+  exportAsPdf: (nodeId: string) => Promise<void>
+}
+
+const FigmaCanvasComponent: React.ForwardRefRenderFunction<FigmaCanvasRef, FigmaCanvasProps> = (props, ref) => {
   // --- State ---
   const [toolMode, setToolMode] = useState<ToolMode>('select')
   const [scale, setScale] = useState(0.3)
@@ -302,19 +326,15 @@ function App() {
   const ocrImageSizeRef = useRef<{ width: number; height: number } | null>(null)
 
   // Mutable node data (position, size, rotation can change)
-  const [nodes, setNodes] = useState<SceneNode[]>([
-    {
-      id: 'node-1',
-      type: 'frame',
-      x: 13.3333,
-      y: 283.333,
-      width: 1024,
-      height: 1536,
-      rotation: 0,
-      title: 'Concert Poster Template Variations',
-      imageSrc: canvasImg,
-    },
-  ])
+  const [nodes, setNodes] = useState<SceneNode[]>(props.initialNodes ?? [])
+
+  useEffect(() => {
+    props.onNodesChange?.(nodes)
+  }, [nodes, props.onNodesChange])
+
+  useEffect(() => {
+    props.onSelectionChange?.(selectedNodeId)
+  }, [selectedNodeId, props.onSelectionChange])
 
   const [framingMode, setFramingMode] = useState(false)
   const [selectionRect, setSelectionRect] = useState<SelRect | null>(null)
@@ -352,6 +372,12 @@ function App() {
   framingModeRef.current = framingMode
   /** Keep latest selectedNode accessible in window handlers without stale closure. */
   const selectedNodeRef = useRef<SceneNode | null>(null)
+  const nodesRef = useRef<SceneNode[]>(nodes)
+  nodesRef.current = nodes
+  const toolModeRef = useRef<ToolMode>(toolMode)
+  toolModeRef.current = toolMode
+  const selectedNodeIdRef = useRef<string | null>(selectedNodeId)
+  selectedNodeIdRef.current = selectedNodeId
   /** Snapshot of selectionRect at the start of a frame move/resize drag. */
   const frameSnapRect = useRef<SelRect | null>(null)
   /** Canvas-space pointer position at the start of a frame draw/move/resize drag. */
@@ -411,15 +437,19 @@ function App() {
     const ref = selectedNodeRef.current
     let x = 100
     let y = 100
+    let w = DEFAULT_W
+    let h = DEFAULT_H
     if (ref) {
-      x = ref.x + (ref.width  - DEFAULT_W) / 2
-      y = ref.y + (ref.height - DEFAULT_H) / 2
+      x = ref.x
+      y = ref.y
+      w = ref.width
+      h = ref.height
     } else {
       const rect = viewportRef.current?.getBoundingClientRect()
       const t = viewportTransformRef.current
       if (rect) {
-        x = (rect.width  / 2 - t.ox) / t.scale - DEFAULT_W / 2
-        y = (rect.height / 2 - t.oy) / t.scale - DEFAULT_H / 2
+        x = (rect.width  / 2 - t.ox) / t.scale - w / 2
+        y = (rect.height / 2 - t.oy) / t.scale - h / 2
       }
     }
     // Ensure exclusivity
@@ -430,8 +460,8 @@ function App() {
     const id = `node-${Date.now()}`
     setNodes(prev => [...prev, {
       id, x, y,
-      width: DEFAULT_W,
-      height: DEFAULT_H,
+      width: w,
+      height: h,
       rotation: 0,
       title: '文本',
       type: 'text' as const,
@@ -471,8 +501,10 @@ function App() {
           let x = 100
           let y = 100
           if (ref) {
-            x = ref.x + (ref.width - w) / 2
-            y = ref.y + (ref.height - h) / 2
+            x = ref.x
+            y = ref.y
+            w = ref.width
+            h = ref.height
           } else {
             const rect = viewportRef.current?.getBoundingClientRect()
             const t = viewportTransformRef.current
@@ -1404,6 +1436,45 @@ function App() {
     if (toolMode === 'hand') return 'grab'
     return 'default'
   }
+
+  // --- API Imperative Handle ---
+  useImperativeHandle(ref, () => ({
+    getNodes: () => nodesRef.current,
+    setNodes,
+    addNode: (node: Omit<SceneNode, 'id'>) => {
+      const id = `node-${Date.now()}`
+      setNodes(prev => [...prev, { ...node, id } as SceneNode])
+      return id
+    },
+    updateNode,
+    deleteNode: (id: string) => {
+      setNodes(prev => prev.filter(n => n.id !== id))
+    },
+    getSelectedNodeId: () => selectedNodeIdRef.current,
+    setSelectedNodeId,
+    getToolMode: () => toolModeRef.current,
+    setToolMode: handleToolModeChange,
+    setFramingMode: handleFramingModeChange,
+    setDoodleMode,
+    setEditTextMode,
+    exportAsPng: async (nodeId: string) => {
+      const node = nodesRef.current.find(n => n.id === nodeId)
+      if (!node) return
+      const base = safeExportBaseName(node.title)
+      const el = document.querySelector(`[data-canvas-node="${nodeId}"]`) as HTMLElement | null
+      if (el) await downloadFramePng(el, base)
+    },
+    exportAsSvg: (nodeId: string) => {
+      const node = nodesRef.current.find(n => n.id === nodeId)
+      if (node) downloadFrameSvg(node, safeExportBaseName(node.title))
+    },
+    exportAsPdf: async (nodeId: string) => {
+      const node = nodesRef.current.find(n => n.id === nodeId)
+      if (!node) return
+      const el = document.querySelector(`[data-canvas-node="${nodeId}"]`) as HTMLElement | null
+      if (el) await downloadFramePdf(el, safeExportBaseName(node.title))
+    }
+  }), [updateNode, handleToolModeChange, handleFramingModeChange])
 
   // --- Render ---
   return (
@@ -2838,6 +2909,41 @@ function FloatingMenu({
         </div>
       )}
     </>
+  )
+}
+
+export const FigmaCanvas = forwardRef(FigmaCanvasComponent)
+
+function App() {
+  const initialNodes: SceneNode[] = [
+    {
+      id: 'node-1',
+      type: 'frame',
+      x: 13.3333,
+      y: 283.333,
+      width: 1024,
+      height: 1536,
+      rotation: 0,
+      title: 'Concert Poster Template Variations 1',
+      imageSrc: canvasImg,
+    },
+    {
+      id: 'node-2',
+      type: 'frame',
+      x: 1100, // Positioned to the right of node-1 (which has width 1024)
+      y: 283.333,
+      width: 1024,
+      height: 1536,
+      rotation: 0,
+      title: 'Concert Poster Template Variations 2',
+      imageSrc: canvasImg,
+    },
+  ]
+
+  return (
+    <div style={{ width: '100vw', height: '100vh', overflow: 'hidden' }}>
+      <FigmaCanvas initialNodes={initialNodes} />
+    </div>
   )
 }
 
