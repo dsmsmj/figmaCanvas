@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import canvasImg from './assets/imges.png'
+import { detectTextRegions, mergeAdjacentRegions, type TextRegion } from './ocrTextDetect'
 import {
   downloadFramePdf,
   downloadFramePng,
@@ -293,6 +294,13 @@ function App() {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>('node-1')
   const [editText, setEditText] = useState('')
 
+  // --- OCR / Edit Text Mode (lifted from FloatingMenu) ---
+  const [editTextMode, setEditTextMode] = useState(false)
+  const [textOverlays, setTextOverlays] = useState<TextRegion[]>([])
+  const [ocrLoading, setOcrLoading] = useState(false)
+  /** 原始图片尺寸（OCR坐标映射用） */
+  const ocrImageSizeRef = useRef<{ width: number; height: number } | null>(null)
+
   // Mutable node data (position, size, rotation can change)
   const [nodes, setNodes] = useState<SceneNode[]>([
     {
@@ -414,6 +422,11 @@ function App() {
         y = (rect.height / 2 - t.oy) / t.scale - DEFAULT_H / 2
       }
     }
+    // Ensure exclusivity
+    setFramingMode(false)
+    setSelectionRect(null)
+    setEditTextMode(false)
+
     const id = `node-${Date.now()}`
     setNodes(prev => [...prev, {
       id, x, y,
@@ -469,7 +482,12 @@ function App() {
             }
           }
 
-          const id = `node-${Date.now()}`
+          // Ensure exclusivity
+    setFramingMode(false)
+    setSelectionRect(null)
+    setEditTextMode(false)
+
+    const id = `node-${Date.now()}`
           setNodes(prev => [...prev, {
             id, x, y,
             width: w,
@@ -491,6 +509,7 @@ function App() {
   const handleStartDoodleMode = useCallback(() => {
     setFramingMode(false)
     setSelectionRect(null)
+    setEditTextMode(false)
     doodleAnchorNode.current = selectedNodeRef.current
     setDoodleMode(true)
     doodleAllStrokes.current = []
@@ -710,6 +729,24 @@ function App() {
     }
   })()
 
+  // Frame popup position: horizontally fixed to the right of the reference frame,
+  // vertically following the selection rect.
+  const framePopupPos = (() => {
+    if (!selectionRect) return { left: 0, top: 0 }
+    const cx = selectionRect.x + selectionRect.w / 2
+    const cy = selectionRect.y + selectionRect.h / 2
+    const container = nodes
+      .filter(n => n.type === 'frame' || n.type === 'image')
+      .filter(n => cx >= n.x && cx <= n.x + n.width && cy >= n.y && cy <= n.y + n.height)
+      .sort((a, b) => (b.x + b.width) - (a.x + a.width))[0]
+    
+    const refNode = container ?? selectedNode ?? { x: selectionRect.x, width: selectionRect.w }
+    return {
+      left: offset.x + (refNode.x + refNode.width) * scale + 12,
+      top:  offset.y + selectionRect.y * scale,
+    }
+  })()
+
   // --- Helper: update a single node ---
   const updateNode = useCallback((id: string, patch: Partial<BaseNode>) => {
     setNodes((prev) => prev.map((n) => (n.id === id ? { ...n, ...patch } : n)))
@@ -781,6 +818,15 @@ function App() {
       }
 
       if (framingModeRef.current && e.button === 0) {
+        const target = e.target as HTMLElement
+        const isBlank = target.classList.contains('viewport') || target.classList.contains('locating-container')
+        if (isBlank) {
+          setFramingMode(false)
+          setSelectionRect(null)
+          e.preventDefault()
+          return
+        }
+
         const rect = viewportRef.current?.getBoundingClientRect()
         if (!rect) return
         const t = viewportTransformRef.current
@@ -838,17 +884,23 @@ function App() {
       e.stopPropagation()
       e.preventDefault()
       if (framingModeRef.current) {
-        const rect = viewportRef.current?.getBoundingClientRect()
-        if (!rect) return
-        const t = viewportTransformRef.current
-        const sn = selectedNodeRef.current
-        let cp = screenToCanvas(e.clientX - rect.left, e.clientY - rect.top, t.ox, t.oy, t.scale)
-        if (sn) cp = clampToAABB(cp, getNodeAABB(sn))
-        dragAction.current = { type: 'drawframe', startCanvas: cp }
-        frameStartCanvas.current = cp
-        setSelectionRect({ x: cp.x, y: cp.y, w: 0, h: 0 })
-        setFrameDrawing(true)
-        return
+        if (nodeId !== selectedNodeRef.current?.id) {
+          setFramingMode(false)
+          setSelectionRect(null)
+          // Fall through to select the new node
+        } else {
+          const rect = viewportRef.current?.getBoundingClientRect()
+          if (!rect) return
+          const t = viewportTransformRef.current
+          const sn = selectedNodeRef.current
+          let cp = screenToCanvas(e.clientX - rect.left, e.clientY - rect.top, t.ox, t.oy, t.scale)
+          if (sn) cp = clampToAABB(cp, getNodeAABB(sn))
+          dragAction.current = { type: 'drawframe', startCanvas: cp }
+          frameStartCanvas.current = cp
+          setSelectionRect({ x: cp.x, y: cp.y, w: 0, h: 0 })
+          setFrameDrawing(true)
+          return
+        }
       }
       setSelectedNodeId(nodeId)
       dragAction.current = { type: 'move', nodeId }
@@ -959,6 +1011,43 @@ function App() {
   const handleFramingModeChange = useCallback((v: boolean) => {
     setFramingMode(v)
     if (!v) setSelectionRect(null)
+    if (v) {
+      setEditTextMode(false)
+    }
+  }, [])
+
+  // --- OCR: trigger text detection ---
+  const handleEnterEditTextMode = useCallback(async () => {
+    setFramingMode(false)
+    setSelectionRect(null)
+    setEditTextMode(true)
+    setTextOverlays([])
+    ocrImageSizeRef.current = null
+
+    // Get selected node's imageSrc
+    const node = selectedNodeRef.current
+    if (!node || (node.type !== 'frame' && node.type !== 'image')) return
+    const imgSrc = (node as { imageSrc?: string }).imageSrc
+    if (!imgSrc) return
+
+    setOcrLoading(true)
+    try {
+      const { regions, imageSize } = await detectTextRegions(imgSrc)
+      ocrImageSizeRef.current = imageSize
+      // 合并相邻 word 为行级区域
+      const merged = mergeAdjacentRegions(regions)
+      setTextOverlays(merged)
+    } catch (err) {
+      console.error('OCR detection failed:', err)
+    } finally {
+      setOcrLoading(false)
+    }
+  }, [])
+
+  const handleExitEditTextMode = useCallback(() => {
+    setEditTextMode(false)
+    setTextOverlays([])
+    ocrImageSizeRef.current = null
   }, [])
 
   // --- Global mouse move & up (window level for reliable tracking) ---
@@ -1375,6 +1464,9 @@ function App() {
                 onRotateMouseDown={(e) => handleRotateMouseDown(e, node.id)}
                 onTextContentChange={handleTextContentChange}
                 clipRect={clipRect}
+                textOverlays={node.id === selectedNodeId && editTextMode ? textOverlays : undefined}
+                ocrImageSize={node.id === selectedNodeId && editTextMode ? ocrImageSizeRef.current ?? undefined : undefined}
+                ocrLoading={node.id === selectedNodeId && editTextMode && ocrLoading}
               />
             )
           })}
@@ -1408,11 +1500,11 @@ function App() {
         )}
       </div>
 
-      {/* Frame Selection Popup (bottom-right of selection rect, screen coords) */}
+      {/* Frame Selection Popup */}
       {framingMode && selectionRect && !frameDrawing && selectionRect.w > 2 && selectionRect.h > 2 && (
         <FramePopup
-          left={offset.x + (selectionRect.x + selectionRect.w) * scale + 8}
-          top={offset.y + (selectionRect.y + selectionRect.h) * scale + 8}
+          left={framePopupPos.left}
+          top={framePopupPos.top}
           selectionRect={selectionRect}
           selectedNode={selectedNode ?? null}
           editText={selectionEditText}
@@ -1512,6 +1604,10 @@ function App() {
           onAddTextElement={handleAddTextElement}
           onAddImageElement={handleAddImageElement}
           onAddDoodleElement={handleStartDoodleMode}
+          editTextMode={editTextMode}
+          ocrLoading={ocrLoading}
+          onEnterEditTextMode={handleEnterEditTextMode}
+          onExitEditTextMode={handleExitEditTextMode}
         />
       )}
     </div>
@@ -1617,6 +1713,12 @@ interface CanvasNodeProps {
   onTextContentChange?: (id: string, text: string) => void
   /** 父框架的画布坐标矩形；存在时将文本内容裁剪到该范围 */
   clipRect?: { x: number; y: number; width: number; height: number }
+  /** OCR 识别到的文字区域（像素坐标） */
+  textOverlays?: TextRegion[]
+  /** OCR 识别图片的原始尺寸 */
+  ocrImageSize?: { width: number; height: number }
+  /** OCR 正在加载中 */
+  ocrLoading?: boolean
 }
 
 const TEXT_STYLE_FIXED: React.CSSProperties = {
@@ -1634,7 +1736,7 @@ const TEXT_STYLE_FIXED: React.CSSProperties = {
 function CanvasNode({
   node, isSelected, borderWidth, handleSize, titleScale,
   onMouseDown, onResizeMouseDown, onRotateMouseDown, onTextContentChange,
-  clipRect,
+  clipRect, textOverlays, ocrImageSize, ocrLoading,
 }: CanvasNodeProps) {
   const selectionColor = 'rgb(15, 127, 255)'
 
@@ -1766,6 +1868,56 @@ function CanvasNode({
                 <div className="w-full h-full bg-[#ececec]" aria-hidden />
               )}
             </div>
+
+            {/* OCR Loading 状态 */}
+            {ocrLoading && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/20 z-[5]">
+                <div className="bg-white rounded-lg px-4 py-2 shadow-lg flex items-center gap-2">
+                  <svg className="animate-spin w-4 h-4 text-[rgb(15,127,255)]" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  <span className="text-sm text-[#232425] font-[Arial,sans-serif]">识别文字中...</span>
+                </div>
+              </div>
+            )}
+
+            {/* OCR 文字区域蒙版 */}
+            {textOverlays && textOverlays.length > 0 && ocrImageSize && (() => {
+              // 将 OCR 像素坐标映射到节点画布坐标
+              const scaleX = node.width / ocrImageSize.width
+              const scaleY = node.height / ocrImageSize.height
+              return textOverlays.map((region, i) => {
+                const left = region.bbox.x0 * scaleX
+                const top = region.bbox.y0 * scaleY
+                const width = (region.bbox.x1 - region.bbox.x0) * scaleX
+                const height = (region.bbox.y1 - region.bbox.y0) * scaleY
+                return (
+                  <div
+                    key={`ocr-${i}`}
+                    title={region.text}
+                    className="group/ocr absolute z-[4] cursor-pointer transition-colors duration-150"
+                    style={{
+                      left,
+                      top,
+                      width,
+                      height,
+                      backgroundColor: 'rgba(15, 127, 255, 0.18)',
+                      border: '1px solid rgba(15, 127, 255, 0.45)',
+                      borderRadius: 2,
+                    }}
+                    onMouseEnter={e => {
+                      (e.currentTarget as HTMLElement).style.backgroundColor = 'rgba(15, 127, 255, 0.35)'
+                      ;(e.currentTarget as HTMLElement).style.borderColor = 'rgba(15, 127, 255, 0.8)'
+                    }}
+                    onMouseLeave={e => {
+                      (e.currentTarget as HTMLElement).style.backgroundColor = 'rgba(15, 127, 255, 0.18)'
+                      ;(e.currentTarget as HTMLElement).style.borderColor = 'rgba(15, 127, 255, 0.45)'
+                    }}
+                  />
+                )
+              })
+            })()}
           </div>
         )}
 
@@ -2334,6 +2486,14 @@ interface FloatingMenuProps {
   onAddTextElement: () => void
   onAddImageElement: () => void
   onAddDoodleElement: () => void
+  /** 编辑文本模式（由 App 控制） */
+  editTextMode: boolean
+  /** OCR 正在加载 */
+  ocrLoading: boolean
+  /** 进入编辑文本模式（触发 OCR） */
+  onEnterEditTextMode: () => void
+  /** 退出编辑文本模式 */
+  onExitEditTextMode: () => void
 }
 
 function FloatingMenu({
@@ -2350,9 +2510,12 @@ function FloatingMenu({
   onAddTextElement,
   onAddImageElement,
   onAddDoodleElement,
+  editTextMode,
+  ocrLoading,
+  onEnterEditTextMode,
+  onExitEditTextMode,
 }: FloatingMenuProps) {
   const [activePanel, setActivePanel] = useState<null | 'toolbox' | 'addElement' | 'export'>(null)
-  const [editTextMode, setEditTextMode] = useState(false)
 
   const togglePanel = (panel: 'toolbox' | 'addElement' | 'export') =>
     setActivePanel((cur) => (cur === panel ? null : panel))
@@ -2380,7 +2543,9 @@ function FloatingMenu({
             <div className="bg-[#eaeaea] w-px h-4 mx-1" />
 
             {/* 提示文字 */}
-            <span className="font-[Arial] text-sm text-[#909599] whitespace-nowrap px-2">选择一个文本区域以编辑</span>
+            <span className="font-[Arial] text-sm text-[#909599] whitespace-nowrap px-2">
+              {ocrLoading ? '正在识别文字区域...' : '选择一个文本区域以编辑'}
+            </span>
 
             <div className="bg-[#eaeaea] w-px h-4 mx-1" />
 
@@ -2388,7 +2553,7 @@ function FloatingMenu({
             <button
               type="button"
               className={`${menuBtnBase} text-[#232425]`}
-              onClick={() => setEditTextMode(false)}
+              onClick={onExitEditTextMode}
             >
               取消
             </button>
@@ -2422,7 +2587,7 @@ function FloatingMenu({
               <div className="text-[#232425] bg-white border border-[#eaeaea] rounded-xl flex items-center h-10 p-0.5 shadow-[0_2px_8px_rgba(0,0,0,0.1)]">
                 <button className={menuBtnBase} onClick={() => {
                   onFramingModeChange(false)
-                  setEditTextMode(true)
+                  onEnterEditTextMode()
                 }}>
                   <AiEditIcon />
                   <span className="font-[Arial] text-sm z-[1] tracking-normal font-normal leading-[150%] relative">编辑文本</span>
