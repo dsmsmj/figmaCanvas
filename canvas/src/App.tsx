@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect, useMemo } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import canvasImg from './assets/imges.png'
 import {
   downloadFramePdf,
@@ -13,6 +13,26 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
 } from '@/components/ui/dropdown-menu'
+import {
+  Vec2,
+  rotateVec,
+  normalizeVec,
+  screenToCanvas,
+  pointsToSvgPath,
+  clampToAABB,
+} from './types'
+import type {
+  SceneNode,
+  FrameNode,
+  BaseNode,
+  ResizeCorner,
+  FrameDir,
+  SelRect,
+  AABB,
+  ToolMode,
+  DragAction,
+  Position,
+} from './types'
 
 /* ============================
    SVG Icon Components
@@ -129,90 +149,13 @@ const DropdownArrowIcon = () => (
 )
 
 /* ============================
-   Type Definitions
+   Constants
    ============================ */
-
-type ToolMode = 'select' | 'hand'
-
-interface Position {
-  x: number
-  y: number
-}
-
-type ResizeCorner = 'tl' | 'tr' | 'br' | 'bl'
-
-class Vec2 {
-  x: number
-  y: number
-
-  constructor(x: number, y: number) {
-    this.x = x
-    this.y = y
-  }
-
-  add(v: Vec2) {
-    return new Vec2(this.x + v.x, this.y + v.y)
-  }
-
-  sub(v: Vec2) {
-    return new Vec2(this.x - v.x, this.y - v.y)
-  }
-
-  had(v: Vec2) {
-    return new Vec2(this.x * v.x, this.y * v.y)
-  }
-
-  static of(x: number, y: number) {
-    return new Vec2(x, y)
-  }
-
-  static dot(a: Vec2, b: Vec2) {
-    return a.x * b.x + a.y * b.y
-  }
-}
 
 const MIN_NODE_SIZE = 50
 /** 新建无图画框的默认宽高（画布坐标） */
 const DEFAULT_NEW_FRAME_W = 1080
 const DEFAULT_NEW_FRAME_H = 1920
-
-/** CSS-style 2D rotation of a vector (degrees, +y down). */
-function rotateVec(v: Vec2, deg: number): Vec2 {
-  if (!deg) return v
-  const r = (deg * Math.PI) / 180
-  const c = Math.cos(r)
-  const s = Math.sin(r)
-  return Vec2.of(v.x * c - v.y * s, v.x * s + v.y * c)
-}
-
-function normalizeVec(v: Vec2): Vec2 {
-  const len = Math.hypot(v.x, v.y)
-  if (len < 1e-12) return Vec2.of(1, 0)
-  return Vec2.of(v.x / len, v.y / len)
-}
-
-/** Convert an array of [x,y] points to a smooth SVG path using quadratic midpoint interpolation. */
-function pointsToSvgPath(pts: [number, number][]): string {
-  if (pts.length === 0) return ''
-  if (pts.length === 1) return `M${pts[0][0]} ${pts[0][1]}L${pts[0][0]} ${pts[0][1]}`
-  let d = `M${pts[0][0]} ${pts[0][1]}`
-  if (pts.length === 2) return d + `L${pts[1][0]} ${pts[1][1]}`
-  for (let i = 1; i < pts.length - 1; i++) {
-    const mx = (pts[i][0] + pts[i + 1][0]) / 2
-    const my = (pts[i][1] + pts[i + 1][1]) / 2
-    d += `Q${pts[i][0]} ${pts[i][1]} ${mx} ${my}`
-  }
-  const last = pts[pts.length - 1]
-  return d + `L${last[0]} ${last[1]}`
-}
-
-/** Convert viewport-local pixel coords to canvas (world) coords. */
-function screenToCanvas(vx: number, vy: number, ox: number, oy: number, sc: number): Vec2 {
-  return Vec2.of((vx - ox) / sc, (vy - oy) / sc)
-}
-
-type FrameDir = 'tl' | 'tr' | 'bl' | 'br' | 't' | 'b' | 'l' | 'r'
-interface SelRect { x: number; y: number; w: number; h: number }
 
 const FRAME_DIRS: Record<FrameDir, { sign: Vec2; pos: Vec2 }> = {
   tl: { sign: Vec2.of(-1, -1), pos: Vec2.of(1, 1) },
@@ -230,10 +173,12 @@ const FRAME_BORDER_W = 6.66667
 const FRAME_HANDLE_SIZE = 46.6667
 const FRAME_EDGE_LONG = 73.3333
 
-interface AABB { minX: number; minY: number; maxX: number; maxY: number }
+/* ============================
+   Geometry Helpers
+   ============================ */
 
 /** Axis-aligned bounding box of a node in canvas space (handles rotation). */
-function getNodeAABB(node: NodeData): AABB {
+function getNodeAABB(node: SceneNode): AABB {
   if (!node.rotation) {
     return { minX: node.x, minY: node.y, maxX: node.x + node.width, maxY: node.y + node.height }
   }
@@ -255,31 +200,18 @@ function getNodeAABB(node: NodeData): AABB {
   }
 }
 
-/** Clamp a canvas-space point to within an AABB. */
-function clampToAABB(v: Vec2, a: AABB): Vec2 {
-  return Vec2.of(
-    Math.max(a.minX, Math.min(a.maxX, v.x)),
-    Math.max(a.minY, Math.min(a.maxY, v.y)),
-  )
-}
-
-
 /** Local offset from node center to a corner (unrotated box, +y down). */
 function cornerOffsetFromCenter(corner: ResizeCorner, w: number, h: number): Vec2 {
   switch (corner) {
-    case 'tl':
-      return Vec2.of(-w / 2, -h / 2)
-    case 'tr':
-      return Vec2.of(w / 2, -h / 2)
-    case 'br':
-      return Vec2.of(w / 2, h / 2)
-    case 'bl':
-      return Vec2.of(-w / 2, h / 2)
+    case 'tl': return Vec2.of(-w / 2, -h / 2)
+    case 'tr': return Vec2.of(w / 2, -h / 2)
+    case 'br': return Vec2.of(w / 2, h / 2)
+    case 'bl': return Vec2.of(-w / 2, h / 2)
   }
 }
 
 /** Corner position in canvas (parent) space, accounting for rotation about box center. */
-function canvasCornerPos(n: NodeData, corner: ResizeCorner): Vec2 {
+function canvasCornerPos(n: BaseNode, corner: ResizeCorner): Vec2 {
   const cx = n.x + n.width / 2
   const cy = n.y + n.height / 2
   const off = cornerOffsetFromCenter(corner, n.width, n.height)
@@ -291,10 +223,10 @@ function canvasCornerPos(n: NodeData, corner: ResizeCorner): Vec2 {
  * opposite corner fixed in canvas space. Matches large hit targets on handles.
  */
 function resizePatchFromTargetCorner(
-  snap: NodeData,
+  snap: BaseNode,
   corner: ResizeCorner,
   targetCanvas: Vec2
-): Partial<NodeData> {
+): Partial<BaseNode> {
   const aspect = snap.width / snap.height
   const rot = snap.rotation
   const tl0 = canvasCornerPos(snap, 'tl')
@@ -349,42 +281,6 @@ function resizePatchFromTargetCorner(
   return { x: tl.x, y: tl.y, width: newW, height: newH }
 }
 
-type DragAction =
-  | { type: 'none' }
-  | { type: 'pan' }
-  | { type: 'move'; nodeId: string }
-  | { type: 'resize'; nodeId: string; corner: ResizeCorner }
-  | { type: 'rotate'; nodeId: string }
-  | { type: 'drawframe'; startCanvas: Vec2 }
-  | { type: 'moveframe' }
-  | { type: 'resizeframe'; dir: FrameDir }
-  | { type: 'doodle' }
-
-interface NodeData {
-  id: string
-  x: number
-  y: number
-  width: number
-  height: number
-  rotation: number // degrees
-  title: string
-  /** 无则渲染空白画框 */
-  imageSrc?: string
-  /** 文本节点 / 图片节点 / 涂鸦节点 */
-  type?: 'text' | 'image' | 'doodle'
-  textContent?: string
-  fontSize?: number
-  textColor?: string
-  fontFamily?: string
-  fontWeight?: 'normal' | 'bold'
-  fontStyle?: 'normal' | 'italic'
-  textAlign?: 'left' | 'center' | 'right'
-  /** 涂鸦笔画 */
-  doodleStrokes?: { d: string; color: string; width: number }[]
-  /** 涂鸦创建时的原始尺寸（用于 viewBox 缩放） */
-  doodleViewBox?: [number, number]
-}
-
 /* ============================
    Main App Component
    ============================ */
@@ -398,9 +294,10 @@ function App() {
   const [editText, setEditText] = useState('')
 
   // Mutable node data (position, size, rotation can change)
-  const [nodes, setNodes] = useState<NodeData[]>([
+  const [nodes, setNodes] = useState<SceneNode[]>([
     {
       id: 'node-1',
+      type: 'frame',
       x: 13.3333,
       y: 283.333,
       width: 1024,
@@ -429,7 +326,7 @@ function App() {
   const dragAction = useRef<DragAction>({ type: 'none' })
   const lastMousePos = useRef<Position>({ x: 0, y: 0 })
   // Snapshot of node state at drag start (for resize & rotate)
-  const dragStartNode = useRef<NodeData | null>(null)
+  const dragStartNode = useRef<SceneNode | null>(null)
   const dragStartMouse = useRef<Position>({ x: 0, y: 0 })
   /**
    * Viewport-local px: mouse − (offset + cornerCanvas·scale) at mousedown.
@@ -446,7 +343,7 @@ function App() {
   const framingModeRef = useRef(false)
   framingModeRef.current = framingMode
   /** Keep latest selectedNode accessible in window handlers without stale closure. */
-  const selectedNodeRef = useRef<NodeData | null>(null)
+  const selectedNodeRef = useRef<SceneNode | null>(null)
   /** Snapshot of selectionRect at the start of a frame move/resize drag. */
   const frameSnapRect = useRef<SelRect | null>(null)
   /** Canvas-space pointer position at the start of a frame draw/move/resize drag. */
@@ -462,7 +359,7 @@ function App() {
   const doodleLivePathRef = useRef<SVGPathElement>(null)
   const [doodleRenderedStrokes, setDoodleRenderedStrokes] = useState<{ d: string; color: string; width: number }[]>([])
   /** 进入涂鸦模式时的锚点节点快照，用于工具栏定位 */
-  const doodleAnchorNode = useRef<NodeData | null>(null)
+  const doodleAnchorNode = useRef<SceneNode | null>(null)
   const DOODLE_COLOR = '#000000'
   const DOODLE_WIDTH = 8
 
@@ -482,8 +379,9 @@ function App() {
       y = cy - h / 2
     }
     const id = `node-${Date.now()}`
-    const newNode: NodeData = {
+    const newNode: FrameNode = {
       id,
+      type: 'frame',
       x,
       y,
       width: w,
@@ -637,8 +535,8 @@ function App() {
       rotation: 0,
       title: '涂鸦',
       type: 'doodle' as const,
-      doodleStrokes,
-      doodleViewBox: [w, h],
+      strokes: doodleStrokes,
+      viewBox: [w, h],
     }])
     // 退出涂鸦后恢复到进入前选中的节点
     setSelectedNodeId(anchorId)
@@ -671,35 +569,35 @@ function App() {
   }, [])
 
   const handleTextContentChange = useCallback((id: string, text: string) => {
-    setNodes(prev => prev.map(n => n.id === id ? { ...n, textContent: text } : n))
+    setNodes(prev => prev.map(n => n.id === id && n.type === 'text' ? { ...n, textContent: text } : n))
   }, [])
 
   const handleFontSizeChange = useCallback((id: string, newSize: number) => {
     setNodes(prev => prev.map(n => {
-      if (n.id !== id) return n
-      const ratio = newSize / (n.fontSize ?? 80)
+      if (n.id !== id || n.type !== 'text') return n
+      const ratio = newSize / n.fontSize
       return { ...n, fontSize: newSize, height: Math.round(n.height * ratio) }
     }))
   }, [])
 
   const handleTextColorChange = useCallback((id: string, color: string) => {
-    setNodes(prev => prev.map(n => n.id === id ? { ...n, textColor: color } : n))
+    setNodes(prev => prev.map(n => n.id === id && n.type === 'text' ? { ...n, textColor: color } : n))
   }, [])
 
   const handleFontFamilyChange = useCallback((id: string, family: string) => {
-    setNodes(prev => prev.map(n => n.id === id ? { ...n, fontFamily: family } : n))
+    setNodes(prev => prev.map(n => n.id === id && n.type === 'text' ? { ...n, fontFamily: family } : n))
   }, [])
 
   const handleFontWeightChange = useCallback((id: string, weight: 'normal' | 'bold') => {
-    setNodes(prev => prev.map(n => n.id === id ? { ...n, fontWeight: weight } : n))
+    setNodes(prev => prev.map(n => n.id === id && n.type === 'text' ? { ...n, fontWeight: weight } : n))
   }, [])
 
   const handleFontStyleChange = useCallback((id: string, style: 'normal' | 'italic') => {
-    setNodes(prev => prev.map(n => n.id === id ? { ...n, fontStyle: style } : n))
+    setNodes(prev => prev.map(n => n.id === id && n.type === 'text' ? { ...n, fontStyle: style } : n))
   }, [])
 
   const handleTextAlignChange = useCallback((id: string, align: 'left' | 'center' | 'right') => {
-    setNodes(prev => prev.map(n => n.id === id ? { ...n, textAlign: align } : n))
+    setNodes(prev => prev.map(n => n.id === id && n.type === 'text' ? { ...n, textAlign: align } : n))
   }, [])
 
   const handleDeleteSelected = useCallback(() => {
@@ -711,7 +609,7 @@ function App() {
       return prev.filter((n) => {
         if (n.id === id) return false // delete target node
         // If the target node is a frame (no type), delete any content inside it
-        if (!host.type && (n.type === 'text' || n.type === 'image' || n.type === 'doodle')) {
+        if (host.type === 'frame' && (n.type === 'text' || n.type === 'image' || n.type === 'doodle')) {
           const cx = n.x + n.width / 2
           const cy = n.y + n.height / 2
           if (
@@ -802,7 +700,7 @@ function App() {
     // Pick the non-text node whose right edge is furthest right and still
     // contains the text node's centre – that is the "parent" frame.
     const container = nodes
-      .filter(n => n.id !== selectedNode.id && !n.type)
+      .filter(n => n.id !== selectedNode.id && n.type === 'frame')
       .filter(n => cx >= n.x && cx <= n.x + n.width && cy >= n.y && cy <= n.y + n.height)
       .sort((a, b) => (b.x + b.width) - (a.x + a.width))[0]
     const refNode = container ?? selectedNode
@@ -813,7 +711,7 @@ function App() {
   })()
 
   // --- Helper: update a single node ---
-  const updateNode = useCallback((id: string, patch: Partial<NodeData>) => {
+  const updateNode = useCallback((id: string, patch: Partial<BaseNode>) => {
     setNodes((prev) => prev.map((n) => (n.id === id ? { ...n, ...patch } : n)))
   }, [])
 
@@ -1458,7 +1356,7 @@ function App() {
               const cx = node.x + node.width  / 2
               const cy = node.y + node.height / 2
               const parent = nodes.find(
-                n => !n.type && n.id !== node.id &&
+                n => n.type === 'frame' && n.id !== node.id &&
                      cx >= n.x && cx <= n.x + n.width &&
                      cy >= n.y && cy <= n.y + n.height
               )
@@ -1599,7 +1497,7 @@ function App() {
       )}
 
       {/* Floating Menu (only when a non-text node is selected) */}
-      {selectedNode && !selectedNode.type && !doodleMode && (
+      {selectedNode && selectedNode.type === 'frame' && !doodleMode && (
         <FloatingMenu
           left={floatingMenuPos.left}
           top={floatingMenuPos.top}
@@ -1708,7 +1606,7 @@ function TopToolbar({
    ============================ */
 
 interface CanvasNodeProps {
-  node: NodeData
+  node: SceneNode
   isSelected: boolean
   borderWidth: number
   handleSize: number
@@ -1742,7 +1640,7 @@ function CanvasNode({
 
   // 将文本/图片/涂鸦内容裁剪到父框架范围（画布坐标，inset 值单位与 CanvasNode 内部 px 一致）
   const clipPath = (() => {
-    if (!clipRect || (node.type !== 'text' && node.type !== 'image' && node.type !== 'doodle')) return undefined
+    if (!clipRect || node.type === 'frame') return undefined
     const t = Math.max(0, clipRect.y - node.y)
     const r = Math.max(0, (node.x + node.width)  - (clipRect.x + clipRect.width))
     const b = Math.max(0, (node.y + node.height) - (clipRect.y + clipRect.height))
@@ -1766,14 +1664,13 @@ function CanvasNode({
 
   const endEdit = () => setTextEditing(false)
 
-  const isText = node.type === 'text'
-  const isDoodle = node.type === 'doodle'
-  const fontSize    = node.fontSize   ?? 80
-  const textColor   = node.textColor  ?? '#000000'
-  const fontFamily  = node.fontFamily ?? 'Arial, sans-serif'
-  const fontWeight  = node.fontWeight ?? 'normal'
-  const fontStyle   = node.fontStyle  ?? 'normal'
-  const textAlign   = node.textAlign  ?? 'left'
+  const textNode = node.type === 'text' ? node : null
+  const fontSize    = textNode?.fontSize   ?? 80
+  const textColor   = textNode?.textColor  ?? '#000000'
+  const fontFamily  = textNode?.fontFamily ?? 'Arial, sans-serif'
+  const fontWeight  = textNode?.fontWeight ?? 'normal'
+  const fontStyle   = textNode?.fontStyle  ?? 'normal'
+  const textAlign   = textNode?.textAlign  ?? 'left'
   const TEXT_STYLE: React.CSSProperties = {
     ...TEXT_STYLE_FIXED,
     color: textColor,
@@ -1806,7 +1703,7 @@ function CanvasNode({
         }}
       >
         {/* Page Title — 文本/涂鸦节点不显示标题 */}
-        {!isText && !isDoodle && (
+        {(node.type === 'frame' || node.type === 'image') && (
           <div
             className="pointer-events-auto overflow-hidden text-ellipsis select-none whitespace-nowrap absolute"
             style={{
@@ -1822,7 +1719,7 @@ function CanvasNode({
         )}
 
         {/* Content */}
-        {isText ? (
+        {node.type === 'text' ? (
           /* 文本节点：透明背景，参考 textElemnt.html 结构 */
           <div style={{ cursor: 'default', position: 'relative', width: '100%', height: '100%' }}
             onDoubleClick={beginEdit}
@@ -1831,7 +1728,7 @@ function CanvasNode({
               <textarea
                 ref={textareaRef}
                 style={{ ...TEXT_STYLE, fontSize, resize: 'none', width: '100%', height: '100%', overflow: 'hidden' }}
-                value={node.textContent ?? ''}
+                value={node.textContent}
                 onChange={e => onTextContentChange?.(node.id, e.target.value)}
                 onBlur={endEdit}
                 onKeyDown={e => e.key === 'Escape' && endEdit()}
@@ -1842,25 +1739,25 @@ function CanvasNode({
                 className="text-display"
                 style={{ ...TEXT_STYLE, fontSize, userSelect: 'none', width: '100%', height: '100%' }}
               >
-                {node.textContent ?? '文本'}
+                {node.textContent}
               </div>
             )}
           </div>
-        ) : isDoodle ? (
+        ) : node.type === 'doodle' ? (
           /* 涂鸦节点 */
           <svg
             width={node.width}
             height={node.height}
-            viewBox={node.doodleViewBox ? `0 0 ${node.doodleViewBox[0]} ${node.doodleViewBox[1]}` : `0 0 ${node.width} ${node.height}`}
+            viewBox={`0 0 ${node.viewBox[0]} ${node.viewBox[1]}`}
             className="select-none"
             style={{ position: 'absolute', top: 0, left: 0 }}
           >
-            {node.doodleStrokes?.map((s, i) => (
+            {node.strokes.map((s: { d: string; color: string; width: number }, i: number) => (
               <path key={i} d={s.d} stroke={s.color} strokeWidth={s.width} fill="none" strokeLinecap="round" strokeLinejoin="round" />
             ))}
           </svg>
         ) : (
-          /* 图片/空白画框 */
+          /* 图片/空白画框 (FrameNode | ImageNode) */
           <div className="overflow-hidden flex justify-center items-center w-full h-full relative">
             <div className="flex justify-center items-center w-full h-full relative">
               {node.imageSrc ? (
@@ -1968,7 +1865,7 @@ interface FramePopupProps {
   left: number
   top: number
   selectionRect: SelRect
-  selectedNode: NodeData | null
+  selectedNode: SceneNode | null
   editText: string
   onEditTextChange: (v: string) => void
   onApply: () => void
@@ -2001,7 +1898,7 @@ function FramePopup({ left, top, selectionRect, selectedNode, editText, onEditTe
           className="relative overflow-hidden rounded-lg bg-[#f0f0f0] flex-shrink-0"
           style={{ width: previewW, height: previewH }}
         >
-          {selectedNode?.imageSrc ? (
+          {selectedNode && (selectedNode.type === 'frame' || selectedNode.type === 'image') && selectedNode.imageSrc ? (
             <>
               <img
                 src={selectedNode.imageSrc}
